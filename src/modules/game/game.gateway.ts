@@ -20,42 +20,45 @@ export class GameGateway {
   constructor(private readonly gameService: GameService) {}
 
   @SubscribeMessage('item:add')
-  handleItemAdd(client: Socket, payload: { label: string }) {
+  handleItemAdd(_client: Socket, _payload: { label: string }) {
     // TODO: host 검증, 항목 추가, item:added broadcast
   }
 
   @SubscribeMessage('item:remove')
-  handleItemRemove(client: Socket, payload: { itemId: string }) {
+  handleItemRemove(_client: Socket, _payload: { itemId: string }) {
     // TODO
   }
 
   @SubscribeMessage('item:reorder')
-  handleItemReorder(client: Socket, payload: { order: string[] }) {
+  handleItemReorder(_client: Socket, _payload: { order: string[] }) {
     // TODO
   }
 
   @SubscribeMessage('game:select')
-  handleGameSelect(client: Socket, payload: { gameType: string }) {
+  handleGameSelect(_client: Socket, _payload: { gameType: string }) {
     // TODO
   }
 
   @SubscribeMessage('game:start')
-  handleGameStart(client: Socket, payload: { options?: Record<string, unknown> }) {
+  handleGameStart(
+    _client: Socket,
+    _payload: { options?: Record<string, unknown> },
+  ) {
     // TODO: 결과 계산, game:started + game:result broadcast
   }
 
   @SubscribeMessage('game:reset')
-  handleGameReset(client: Socket) {
+  handleGameReset(_client: Socket) {
     // TODO
   }
 
   @SubscribeMessage('vote:cast')
-  handleVoteCast(client: Socket, payload: { optionId: string }) {
+  handleVoteCast(_client: Socket, _payload: { optionId: string }) {
     // TODO: 집계 +1, vote:updated broadcast
   }
 
   @SubscribeMessage('vote:close')
-  handleVoteClose(client: Socket) {
+  handleVoteClose(_client: Socket) {
     // TODO: host 검증, 집계 확정, game:result broadcast
   }
 }

@@ -26,27 +26,27 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(private readonly roomService: RoomService) {}
 
   // 연결 수립 시 자동 실행 — TODO: role·token 인증, client.join(roomId), room:state 전송
-  handleConnection(client: Socket) {
+  handleConnection(_client: Socket) {
     // TODO
   }
 
   // 연결 종료(탭 닫힘 등) 시 자동 실행 — TODO: players에서 제거, participant:left broadcast
-  handleDisconnect(client: Socket) {
+  handleDisconnect(_client: Socket) {
     // TODO
   }
 
   @SubscribeMessage('room:join')
-  handleJoin(client: Socket, payload: { nickname: string }) {
+  handleJoin(_client: Socket, _payload: { nickname: string }) {
     // TODO: players Set 추가, stats +1, participant:joined broadcast
   }
 
   @SubscribeMessage('room:leave')
-  handleLeave(client: Socket) {
+  handleLeave(_client: Socket) {
     // TODO
   }
 
   @SubscribeMessage('room:close')
-  handleClose(client: Socket) {
+  handleClose(_client: Socket) {
     // TODO: host 검증, Redis 방 키 삭제, room:closed broadcast
   }
 }

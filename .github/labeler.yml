@@ -1,0 +1,57 @@
+# 변경 파일 경로 → area/* 라벨 자동 부착 (NestJS 프로젝트 구조 기준)
+
+area/config:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'nest-cli.json'
+      - 'eslint.config.*'
+      - '.prettierrc*'
+      - '.env.example'
+
+area/security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/**/auth/**'
+      - 'src/**/*.guard.ts'
+      - 'src/**/*.strategy.ts'
+      - 'src/**/middleware/**'
+
+area/api:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/main.ts'
+      - 'src/**/*.controller.ts'
+      - 'src/**/*.gateway.ts'
+      - 'src/**/dto/**'
+
+area/domain:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/**/*.entity.ts'
+      - 'src/**/entities/**'
+      - 'src/**/*.repository.ts'
+      - 'migrations/**'
+
+area/service:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/**/*.service.ts'
+      - 'src/**/*.module.ts'
+
+area/infra:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'docker-compose*.yml'
+      - 'Dockerfile*'
+      - 'docker/**'
+      - 'src/**/config/**'
+      - '.github/**'
+
+area/test:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'test/**'
+      - 'src/**/*.spec.ts'

@@ -1,0 +1,50 @@
+name: Stale Cleanup
+
+# 장기 미활동 이슈/PR 자동 라벨 + 닫기
+# actions/stale 공식 액션 사용
+
+on:
+  schedule:
+    # 매일 09:00 KST (00:00 UTC) 실행
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: Mark stale issues/PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply stale policy
+        uses: actions/stale@v9
+        with:
+          # ── 이슈 정책 ──────────────────────────────────────
+          days-before-issue-stale: 30
+          days-before-issue-close: 7
+          stale-issue-label: 'status/stale'
+          exempt-issue-labels: 'priority/critical,priority/high,pinned,security,help-wanted'
+          stale-issue-message: |
+            👋 이 이슈는 30일간 활동이 없어 `status/stale` 로 표시되었습니다.
+            7일 내 추가 코멘트가 없으면 자동으로 닫힙니다.
+            계속 추적이 필요하면 코멘트 한 줄만 남겨주세요.
+          close-issue-message: |
+            🗄️ 추가 활동이 없어 자동으로 닫힙니다. 필요 시 언제든 재오픈해 주세요.
+
+          # ── PR 정책 ───────────────────────────────────────
+          days-before-pr-stale: 14
+          days-before-pr-close: 7
+          stale-pr-label: 'status/stale'
+          exempt-pr-labels: 'priority/critical,priority/high,wip,blocked'
+          stale-pr-message: |
+            👋 이 PR 은 14일간 업데이트가 없어 `status/stale` 로 표시되었습니다.
+            7일 내 활동이 없으면 자동으로 닫힙니다. 계속 진행할 거라면 코멘트나 푸시를 남겨주세요.
+          close-pr-message: |
+            🗄️ 활동이 없어 자동으로 닫힙니다. 다시 작업할 때 언제든 재오픈해 주세요.
+
+          # ── 공통 ──────────────────────────────────────────
+          operations-per-run: 50
+          remove-stale-when-updated: true
+          ascending: true

@@ -1,0 +1,78 @@
+name: Slack Notify
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  notify:
+    name: Slack Notification
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification
+        # SLACK_WEBHOOK_URL 시크릿을 아직 등록하지 않았다면 조용히 건너뛴다.
+        # (가드가 없으면 웹훅 없는 상태에서 머지할 때마다 워크플로가 빨간불이 된다)
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: env.SLACK_WEBHOOK_URL != ''
+        run: |
+          ADDITIONS="${{ github.event.pull_request.additions }}"
+          DELETIONS="${{ github.event.pull_request.deletions }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_NUM="${{ github.event.pull_request.number }}"
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          SHORT_SHA="${MERGE_SHA:0:7}"
+          COMMIT_URL="${{ github.event.repository.html_url }}/commit/${MERGE_SHA}"
+          REPO="${{ github.event.repository.full_name }}"
+
+          # Detect type from PR title (conventional commits)
+          TYPE_EMOJI="📦"
+          case "${TITLE}" in
+            feat*)     TYPE_EMOJI="✨" ;;
+            fix*)      TYPE_EMOJI="🐛" ;;
+            docs*)     TYPE_EMOJI="📝" ;;
+            chore*)    TYPE_EMOJI="🔧" ;;
+            refactor*) TYPE_EMOJI="♻️" ;;
+            test*)     TYPE_EMOJI="🧪" ;;
+          esac
+
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d @- <<PAYLOAD
+          {
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "${TYPE_EMOJI} *<${PR_URL}|#${PR_NUM}>* merged to \`main\`\n*${TITLE}*"
+                }
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "👤 *${AUTHOR}*  ·  📊 \`+${ADDITIONS}\` \`-${DELETIONS}\`  ·  🏷️ \`${SHORT_SHA}\`"
+                  }
+                ]
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "<${PR_URL}|View PR>  ·  <${COMMIT_URL}|View Commit>  ·  ${REPO}"
+                  }
+                ]
+              }
+            ]
+          }
+          PAYLOAD

@@ -1,0 +1,41 @@
+# ⚠️ 활성화 가이드 (현재는 모두 주석 처리되어 비활성 상태)
+#
+# 1) 아래 placeholder( @your-* )를 실제 팀원 GitHub 아이디로 교체하세요.
+#    조직(Team) 단위로 묶고 싶으면 @2026-siheung-project-Team-A/team-slug 형식 사용.
+#
+# 2) 활성화하려는 라인의 맨 앞 `#` 를 제거하세요.
+#    주석 그대로 두면 GitHub 가 해당 라인을 무시하므로 PR 리뷰 요청이 실패하지 않습니다.
+#
+# 3) (선택) Settings → Branches → main 의 "Require review from Code Owners" 토글로 강제.
+#
+# 문법: <path-glob>  @owner1 @owner2
+# 마지막 매칭이 최우선 (위 → 아래 점차 구체화)
+#
+# ──────────────────────────────────────────────────────────────────
+
+# ── 전역 기본 (저장소 모든 변경) ─────────────────────────────────
+# *                                                  @your-team-lead
+
+# ── 인프라 / 배포 / CI ───────────────────────────────────────────
+# /.github/                                          @your-team-lead
+# /Dockerfile                                        @your-team-lead
+# /docker-compose.yml                                @your-team-lead
+# /docker-compose.prod.yml                           @your-team-lead
+
+# ── 빌드 / 의존성 ────────────────────────────────────────────────
+# /package.json                                      @your-team-lead
+# /package-lock.json                                 @your-team-lead
+# /tsconfig.json                                     @your-team-lead
+
+# ── 보안 / 인증 ──────────────────────────────────────────────────
+# /src/**/auth/**                                    @your-security-owner
+# /src/**/*.guard.ts                                 @your-security-owner
+# /src/**/*.strategy.ts                              @your-security-owner
+
+# ── 실시간 통신 (Socket.io) ─────────────────────────────────────
+# /src/**/*.gateway.ts                               @your-realtime-owner
+
+# ── DB / 도메인 ──────────────────────────────────────────────────
+# /src/**/*.entity.ts                                @your-backend-owner
+# /src/**/*.repository.ts                            @your-backend-owner
+# /migrations/                                       @your-backend-owner

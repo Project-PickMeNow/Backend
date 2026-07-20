@@ -1,0 +1,69 @@
+# Dependabot — 의존성 자동 업데이트 PR 생성
+# 문서: https://docs.github.com/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # ── npm 의존성 ───────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    labels:
+      - "type/chore"
+      - "area/config"
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      nestjs:
+        patterns:
+          - "@nestjs/*"
+      socket-io:
+        patterns:
+          - "socket.io*"
+          - "@socket.io/*"
+      test-deps:
+        patterns:
+          - "jest"
+          - "@types/jest"
+          - "ts-jest"
+          - "supertest"
+          - "@types/supertest"
+      lint-deps:
+        patterns:
+          - "eslint*"
+          - "@typescript-eslint/*"
+          - "prettier"
+    ignore:
+      # 메이저 업그레이드는 수동으로
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # ── GitHub Actions ───────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "type/ci"
+      - "area/config"
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+
+  # ── Docker (Dockerfile, docker-compose 이미지 태그) ──────────
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "type/chore"
+      - "area/infra"
+      - "dependencies"
+    commit-message:
+      prefix: "chore"

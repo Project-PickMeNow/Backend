@@ -1,11 +1,17 @@
 # 로컬 개발용 인프라 (PostgreSQL + Redis)
 # 실행: docker compose up -d
+#
+# 호스트 포트는 .env 로 덮어쓸 수 있다(기본값은 표준 포트).
+# 이미 다른 프로젝트가 해당 포트를 쓰고 있으면 .env 에 POSTGRES_PORT / REDIS_PORT 를
+# 다른 값으로 지정한다.
+#  - REDIS_PORT  : 앱이 접속하는 포트와 같은 키라 이 값만 바꾸면 된다.
+#  - POSTGRES_PORT: 앱은 DATABASE_URL 로 접속하므로 URL 안의 포트도 같이 바꿔야 한다.
 services:
   postgres:
     image: postgres:16-alpine
     container_name: pickmeup-postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: pickmeup
       POSTGRES_PASSWORD: pickmeup
@@ -22,7 +28,7 @@ services:
     image: redis:7-alpine
     container_name: pickmeup-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:

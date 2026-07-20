@@ -1,0 +1,24 @@
+// Prisma 스키마 — 우리 ERD
+// 원칙: 게임 데이터는 전부 Redis(휘발), RDB엔 "오래 남길 것"만.
+// 지금 MVP에선 누적 통계(stats) 1테이블만. 로그인·결제 붙으면 users·payments·rooms 추가.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// 서비스 전체 누적 통계 (딱 1행). 대시보드용.
+/// "누구의" 데이터가 아니라 "서비스 전체의" 요약이라 관계 없는 독립 테이블.
+model Stats {
+  id                String   @id @default(uuid()) @db.Uuid
+  totalRooms        BigInt   @default(0) @map("total_rooms") /// 방 생성 누적 (방 만들 때 +1)
+  totalPlays        BigInt   @default(0) @map("total_plays") /// 게임 실행 누적 (돌릴 때 +1)
+  totalParticipants BigInt   @default(0) @map("total_participants") /// 누적 참여자 (입장 시 +1)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("stats")
+}

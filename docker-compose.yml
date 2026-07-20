@@ -1,0 +1,36 @@
+# 로컬 개발용 인프라 (PostgreSQL + Redis)
+# 실행: docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pickmeup-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: pickmeup
+      POSTGRES_PASSWORD: pickmeup
+      POSTGRES_DB: pickmeup
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pickmeup"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pickmeup-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -141,3 +141,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# OMC (오케스트레이션 내부 상태 - 커밋 안 함)
+.omc/

@@ -8,6 +8,8 @@ import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
 import { RoomService } from '../room/room.service';
 import {
+  BalloonPoppedPayload,
+  BalloonStartedPayload,
   DrawPick,
   DrawShuffledPayload,
   DrawState,
@@ -23,6 +25,8 @@ import { VoteEngine } from './engines/vote';
 import { generateLadder } from './engines/ladder';
 import { LADDER } from '../../common/constants/ladder';
 import { DRAW } from '../../common/constants/draw';
+import { BALLOON } from '../../common/constants/balloon';
+import { capacityForGame } from '../../common/constants/room-capacity';
 
 /**
  * 도메인 규칙 위반을 나타내는 에러. code 는 ERROR_CODES 의 값이며
@@ -36,6 +40,19 @@ export class GameError extends Error {
 }
 
 /**
+ * 풍선 게임의 서버 저장 형태 — 클라이언트로 나가는 BalloonState 에 없는 burstAt(터지는 순번)을
+ * 포함한다. 이 값은 걸리기 전까지 절대 밖으로 내보내지 않는다.
+ */
+interface StoredBalloon {
+  capacity: number; // 풍선 크기(최대 펌프 수)
+  burstAt: number; // 비밀 — 누적 펌프가 이 값에 도달하면 터진다 (1..capacity)
+  pumps: number; // 지금까지 누적 펌프 수
+  turnOrder: string[];
+  turnIndex: number;
+  caughtBy: string | null;
+}
+
+/**
  * 게임 서비스 — 항목 관리, 게임 실행(결과 계산).
  * 항목은 방 해시(room:{id})의 items 필드에, 결과는 game:{id}:result 에 저장한다.
  *
@@ -46,6 +63,8 @@ export class GameError extends Error {
 export class GameService {
   /** 게임을 돌리려면 항목이 최소 몇 개 있어야 하는지 */
   private static readonly MIN_ITEMS = 2;
+  /** 게임 옵션(항목) 최대 개수 — 룰렛·슬롯·풍선·투표 공통 상한 */
+  private static readonly MAX_ITEMS = 12;
 
   private readonly voteEngine = new VoteEngine();
 
@@ -62,6 +81,10 @@ export class GameService {
     if (!trimmed) throw new GameError(ERROR_CODES.VALIDATION_ERROR);
 
     const items = this.parseItems(room.items);
+    // 옵션(항목)은 최대 12개까지 — 프론트도 같은 상한을 두지만 서버에서도 안전하게 막는다.
+    if (items.length >= GameService.MAX_ITEMS) {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
     items.push({ id: randomUUID(), label: trimmed });
     await this.saveItems(roomId, items);
     return items;
@@ -94,13 +117,16 @@ export class GameService {
     return reordered;
   }
 
-  /** 게임 종류 선택 → 확정된 gameType 반환 */
+  /** 게임 종류 선택 → 확정된 gameType 반환. 정원도 게임별로 갱신(투표 50 / 그 외 12). */
   async selectGame(roomId: string, gameType: string): Promise<GameType> {
     await this.loadRoomOrThrow(roomId);
     if (!this.isGameType(gameType)) {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
-    await this.redis.client.hset(RedisKeys.room(roomId), 'gameType', gameType);
+    await this.redis.client.hset(RedisKeys.room(roomId), {
+      gameType,
+      maxParticipants: String(capacityForGame(gameType)),
+    });
     return gameType;
   }
 
@@ -166,6 +192,7 @@ export class GameService {
       RedisKeys.gameLadderRevealed(roomId),
       RedisKeys.gameDraw(roomId),
       RedisKeys.gameDrawPicks(roomId),
+      RedisKeys.gameBalloon(roomId),
     );
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
   }
@@ -442,6 +469,13 @@ export class GameService {
     // 꽝은 최소 1개, 최대 c-1개(전부 꽝이면 뽑을 이유가 없다).
     const b = Math.min(c - 1, Math.max(1, Math.floor(blanks)));
 
+    // 1인당 뽑기 상한 — 제비수(c)가 참가자수(people)보다 많으면 참가자도 복수개를 뽑을 수 있게
+    // 상한을 올린다. perPick = ceil(제비수 / 사람수). 제비수 ≤ 사람수면 1(1인 1제비)로 수렴한다.
+    // 사람수는 섞는 시점의 참가자 수로 고정한다(이후 입퇴장에도 라운드 규칙이 흔들리지 않게).
+    // 호스트는 이 상한과 무관하게 여러 개 뽑을 수 있다.
+    const people = await this.redis.client.scard(RedisKeys.roomPlayers(roomId));
+    const perPick = Math.max(1, Math.ceil(c / Math.max(1, people)));
+
     // [0..c-1] 을 섞어 앞의 b개를 꽝 위치로.
     const order = Array.from({ length: c }, (_, i) => i);
     for (let i = order.length - 1; i > 0; i--) {
@@ -452,7 +486,7 @@ export class GameService {
 
     await this.redis.client.set(
       RedisKeys.gameDraw(roomId),
-      JSON.stringify({ count: c, blanks: b, blankSet }),
+      JSON.stringify({ count: c, blanks: b, blankSet, perPick }),
     );
     // 새 라운드 — 옛 뽑기 기록을 지운다.
     await this.redis.client.del(RedisKeys.gameDrawPicks(roomId));
@@ -460,7 +494,7 @@ export class GameService {
     await this.stats.incrementPlays();
     await this.rooms.touchRoom(roomId);
 
-    return { count: c, blanks: b };
+    return { count: c, blanks: b, perPick };
   }
 
   /**
@@ -471,9 +505,10 @@ export class GameService {
   /**
    * 제비 하나 뽑기.
    * - 제비 잠금: HSETNX(index→by) 로 먼저 누른 사람이 선점(중복 뽑기 불가).
-   * - 인원 제한: 참가자(비 host)는 한 라운드에 딱 1개만. host 는 여러 개 뽑을 수 있다.
-   *   같은 닉네임이 이미 뽑았으면 거절. 빠른 더블클릭 레이스를 막으려고 잠금 뒤 재확인해
-   *   2개째가 걸리면 방금 잠근 제비를 되돌린다(그 제비는 다시 뽑을 수 있게).
+   * - 인원 제한: 참가자(비 host)는 한 라운드에 perPick 개까지(섞을 때 정한 1인당 상한).
+   *   보통 1(1인 1제비)이지만 제비수 > 사람수면 여러 개 뽑을 수 있다. host 는 제한 없음.
+   *   상한에 도달한 닉네임이 더 뽑으면 거절. 빠른 더블클릭 레이스를 막으려고 잠금 뒤 재확인해
+   *   상한을 넘긴 제비가 걸리면 방금 잠근 제비를 되돌린다(그 제비는 다시 뽑을 수 있게).
    */
   async pickDraw(
     roomId: string,
@@ -487,7 +522,10 @@ export class GameService {
       count: number;
       blanks: number;
       blankSet: number[];
+      perPick?: number;
     };
+    // 옛 라운드(perPick 저장 전)는 1인 1제비로 안전하게 취급한다.
+    const perPick = round.perPick ?? 1;
 
     if (!Number.isInteger(index) || index < 0 || index >= round.count) {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
@@ -495,10 +533,10 @@ export class GameService {
 
     const picksKey = RedisKeys.gameDrawPicks(roomId);
 
-    // 참가자는 1인 1제비 — 잠그기 전에 먼저 확인(정상 경로 차단).
+    // 참가자는 1인 perPick 제비 — 잠그기 전에 먼저 확인(정상 경로 차단).
     if (!isHost) {
       const already = await this.redis.client.hvals(picksKey);
-      if (already.includes(by)) {
+      if (already.filter((v) => v === by).length >= perPick) {
         throw new GameError(ERROR_CODES.ALREADY_PICKED);
       }
     }
@@ -507,10 +545,10 @@ export class GameService {
     const locked = await this.redis.client.hsetnx(picksKey, String(index), by);
     if (locked === 0) throw new GameError(ERROR_CODES.GAME_RUNNING); // 이미 뽑힌 제비
 
-    // 잠근 뒤 재확인 — 동시 뽑기 레이스로 같은 닉네임이 2개가 됐으면 방금 것을 되돌린다.
+    // 잠근 뒤 재확인 — 동시 뽑기 레이스로 상한을 넘겼으면 방금 것을 되돌린다.
     if (!isHost) {
       const vals = await this.redis.client.hvals(picksKey);
-      if (vals.filter((v) => v === by).length > 1) {
+      if (vals.filter((v) => v === by).length > perPick) {
         await this.redis.client.hdel(picksKey, String(index));
         throw new GameError(ERROR_CODES.ALREADY_PICKED);
       }
@@ -528,6 +566,7 @@ export class GameService {
       count: number;
       blanks: number;
       blankSet: number[];
+      perPick?: number;
     };
     const picksHash = await this.redis.client.hgetall(
       RedisKeys.gameDrawPicks(roomId),
@@ -537,7 +576,144 @@ export class GameService {
       by,
       blank: round.blankSet.includes(Number(i)),
     }));
-    return { count: round.count, blanks: round.blanks, picks };
+    return {
+      count: round.count,
+      blanks: round.blanks,
+      perPick: round.perPick ?? 1,
+      picks,
+    };
+  }
+
+  // ── 풍선 터뜨리기 (러시안 룰렛식, 턴제) ─────────────────────
+  // 룰렛/투표와 달리 game:result 로 안 끝난다. 호스트가 풍선 크기(최대 펌프 수)를 정해 시작하면
+  // 서버가 1..크기 사이의 비밀 '터지는 순번'을 정한다. 참가자들이 순서대로 가운데 풍선을 한 번씩
+  // 펌프하고, 누적 펌프가 그 순번에 도달하는 순간 펌프한 사람이 걸리며(caughtBy) 게임이 끝난다.
+
+  /**
+   * 풍선 게임 시작 — 참가자 순서를 스냅샷하고 터지는 순번을 무작위로 정한다.
+   * 진행 중(아직 안 걸림)인 게임이 있으면 새로 시작할 수 없다.
+   */
+  async startBalloon(
+    roomId: string,
+    total: number,
+  ): Promise<BalloonStartedPayload> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'balloon') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const existing = await this.loadBalloon(roomId);
+    if (existing && existing.caughtBy === null) {
+      throw new GameError(ERROR_CODES.GAME_RUNNING); // 진행 중엔 재시작 불가
+    }
+
+    const turnOrder = await this.redis.client.smembers(
+      RedisKeys.roomPlayers(roomId),
+    );
+    if (turnOrder.length < BALLOON.MIN_PLAYERS) {
+      throw new GameError(ERROR_CODES.NEED_MORE_PLAYERS);
+    }
+
+    const capacity = Math.min(
+      BALLOON.MAX_TOTAL,
+      Math.max(BALLOON.MIN_TOTAL, Math.floor(total) || BALLOON.DEFAULT_TOTAL),
+    );
+    const stored: StoredBalloon = {
+      capacity,
+      burstAt: randomInt(capacity) + 1, // 비밀 — 1..capacity 째 펌프에 터진다
+      pumps: 0,
+      turnOrder,
+      turnIndex: 0,
+      caughtBy: null,
+    };
+    await this.saveBalloon(roomId, stored);
+    await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
+    await this.stats.incrementPlays();
+    await this.rooms.touchRoom(roomId);
+
+    return {
+      capacity,
+      turnOrder,
+      turn: turnOrder[0],
+    };
+  }
+
+  /**
+   * 가운데 풍선 한 번 펌프. 현재 턴 참가자만 가능하다(한 턴에 한 번, 곧바로 다음 사람으로 넘어간다).
+   * 누적 펌프가 비밀 순번(burstAt)에 도달하면 풍선이 터져 그 사람이 걸리고 게임이 끝난다.
+   */
+  async popBalloon(
+    roomId: string,
+    by: string,
+  ): Promise<BalloonPoppedPayload> {
+    const s = await this.loadBalloon(roomId);
+    if (!s) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 시작 전
+    if (s.caughtBy !== null) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 이미 끝남
+
+    if (s.turnOrder[s.turnIndex] !== by) {
+      throw new GameError(ERROR_CODES.NOT_YOUR_TURN);
+    }
+
+    s.pumps += 1;
+
+    if (s.pumps >= s.burstAt) {
+      // 펑! — 걸림, 게임 종료.
+      s.caughtBy = by;
+      await this.saveBalloon(roomId, s);
+      await this.redis.client.hset(
+        RedisKeys.room(roomId),
+        'status',
+        'finished',
+      );
+      await this.rooms.touchRoom(roomId);
+      return { by, pumps: s.pumps, turn: null, caughtBy: by, burst: true };
+    }
+
+    // 안 터짐 — 곧바로 다음(자리에 있는) 참가자로 턴을 넘긴다.
+    s.turnIndex = await this.nextTurnIndex(roomId, s);
+    await this.saveBalloon(roomId, s);
+    await this.rooms.touchRoom(roomId);
+    return {
+      by,
+      pumps: s.pumps,
+      turn: s.turnOrder[s.turnIndex],
+      caughtBy: null,
+      burst: false,
+    };
+  }
+
+  /** 다음 턴 인덱스 — 방을 떠난 참가자는 건너뛴다(모두 떠났으면 제자리). */
+  private async nextTurnIndex(
+    roomId: string,
+    s: StoredBalloon,
+  ): Promise<number> {
+    const members = new Set(
+      await this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+    );
+    let next = s.turnIndex;
+    for (let i = 0; i < s.turnOrder.length; i++) {
+      next = (next + 1) % s.turnOrder.length;
+      if (members.has(s.turnOrder[next])) return next;
+    }
+    return next;
+  }
+
+  /** 저장된 풍선 상태를 읽는다(없거나 깨지면 null). */
+  private async loadBalloon(roomId: string): Promise<StoredBalloon | null> {
+    const raw = await this.redis.client.get(RedisKeys.gameBalloon(roomId));
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as StoredBalloon;
+    } catch {
+      return null;
+    }
+  }
+
+  private async saveBalloon(roomId: string, s: StoredBalloon): Promise<void> {
+    await this.redis.client.set(
+      RedisKeys.gameBalloon(roomId),
+      JSON.stringify(s),
+    );
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────

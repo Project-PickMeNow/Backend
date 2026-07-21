@@ -2,7 +2,7 @@
 export const GAME_TYPES = [
   'roulette', // 룰렛
   'draw', // 제비뽑기
-  'slot', // 슬롯머신
+  'order', // 순서 정하기
   'balloon', // 풍선터뜨리기
   'ladder', // 사다리타기
   'vote', // 투표하기

@@ -8,5 +8,5 @@ export const DRAW = {
   /** 최소 제비 수 */
   MIN: 2,
   /** 최대 제비 수 */
-  MAX: 10,
+  MAX: 12,
 } as const;

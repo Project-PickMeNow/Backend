@@ -6,9 +6,9 @@ import { Item } from '../room/room.types';
  * game:{roomId}:result 에 JSON 으로 저장되고 game:result 이벤트로 broadcast 된다.
  */
 
-/** 룰렛·슬롯: 1명(개) 당첨 */
+/** 룰렛: 1명(개) 당첨 */
 export interface SingleWinnerResult {
-  type: Extract<GameType, 'roulette' | 'slot'>;
+  type: Extract<GameType, 'roulette'>;
   winner: Item;
 }
 
@@ -17,6 +17,12 @@ export interface MultiWinnerResult {
   type: Extract<GameType, 'draw' | 'balloon'>;
   winners: Item[]; // 뽑힌 항목들(무작위 순서)
   winnerCount: number; // winners.length 과 같음(프론트 편의용 명시)
+}
+
+/** 순서 정하기: 항목을 무작위 순열로 1등~N등 줄 세운 결과 */
+export interface OrderResult {
+  type: Extract<GameType, 'order'>;
+  order: Item[]; // 1등부터 순서대로. order[0] = 1등
 }
 
 // ── 사다리타기 (개수 선택형, 네이버 스타일) ──────────────────────────
@@ -75,8 +81,9 @@ export interface DrawPick {
 
 /** 제비뽑기 진행 상태 (room:state 복원용). 아직 섞기 전이면 null. */
 export interface DrawState {
-  count: number; // 제비 개수(= 인원수)
+  count: number; // 제비 개수
   blanks: number; // 꽝 개수
+  perPick: number; // 참가자 1인당 뽑기 상한(= ceil(제비수/사람수), 보통 1)
   picks: DrawPick[]; // 이미 뽑힌 제비들
 }
 
@@ -84,6 +91,40 @@ export interface DrawState {
 export interface DrawShuffledPayload {
   count: number;
   blanks: number;
+  perPick: number; // 참가자 1인당 뽑기 상한(제비수 > 사람수면 2 이상)
+}
+
+// ── 풍선 터뜨리기 (러시안 룰렛식, 턴제) ─────────────────────────────
+// game:result 로 안 끝난다. 호스트가 풍선 개수를 정해 시작(balloon:start)하면 서버가
+// 그중 하나를 비밀 폭탄으로 정한다. 참가자들이 순서대로 턴을 받아 자기 턴에 최대 3번 터뜨리고,
+// 폭탄 풍선을 터뜨린 사람이 걸리며(caughtBy) 게임이 끝난다.
+
+/**
+ * 풍선 게임 진행 상태 (room:state 복원용). burstAt(터지는 순번)은 서버 비밀이라 여기 없다.
+ * turn 은 지금 펌프할 차례인 참가자(걸린 뒤엔 null).
+ */
+export interface BalloonState {
+  capacity: number; // 풍선 크기(이만큼 펌프하면 반드시 터짐)
+  pumps: number; // 지금까지 누적 펌프 수
+  turnOrder: string[]; // 참가자 닉네임 순서(시작 시 스냅샷)
+  turn: string | null; // 현재 턴 참가자(걸린 뒤 null)
+  caughtBy: string | null; // 풍선을 터뜨려 걸린 참가자(진행 중이면 null)
+}
+
+/** balloon:started broadcast — 게임 시작(터지는 순번은 비밀). */
+export interface BalloonStartedPayload {
+  capacity: number;
+  turnOrder: string[];
+  turn: string; // 첫 턴 참가자
+}
+
+/** balloon:popped broadcast — 누군가 풍선을 한 번 펌프할 때마다. */
+export interface BalloonPoppedPayload {
+  by: string; // 이번에 펌프한 참가자
+  pumps: number; // 갱신된 누적 펌프 수
+  turn: string | null; // 다음 턴 참가자 — 걸렸으면 null
+  caughtBy: string | null; // 이 펌프로 터져 걸렸으면 그 사람, 아니면 null
+  burst: boolean; // 이 펌프로 풍선이 터졌는지
 }
 
 /** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */
@@ -103,4 +144,5 @@ export interface VoteResult {
  * gameType 별 결과 판별 유니온(type 필드로 구분) — game:result 로 나가는 게임들.
  * 사다리는 game:result 를 쓰지 않고 ladder:built/revealed 로 진행하므로 여기 없다.
  */
-export type GameResult = SingleWinnerResult | MultiWinnerResult | VoteResult;
+export type GameResult =
+  SingleWinnerResult | MultiWinnerResult | OrderResult | VoteResult;

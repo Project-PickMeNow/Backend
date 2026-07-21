@@ -291,6 +291,45 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
+   * host 풍선 게임 시작 — 참가자 순서를 스냅샷하고 폭탄을 무작위로 정한다.
+   * 전원에게 balloon:started(총 개수·턴 순서·첫 턴)를 알린다(폭탄 위치는 비밀).
+   */
+  @SubscribeMessage('balloon:start')
+  async handleBalloonStart(
+    client: AppSocket,
+    payload: { total?: number },
+  ): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const res = await this.gameService.startBalloon(
+        roomId,
+        payload?.total ?? 0,
+      );
+      this.server.to(roomId).emit('balloon:started', res);
+    });
+  }
+
+  /**
+   * 가운데 풍선 펌프 — 현재 턴 참가자만. 한 번 펌프하면 곧바로 다음 사람 차례가 되고,
+   * 누적 펌프가 비밀 순번에 도달하면 그 사람이 걸리고 게임 종료.
+   * host 는 턴 순서에 없으므로(닉네임 없음) 펌프할 수 없다. 결과는 balloon:popped 로 전원 broadcast.
+   */
+  @SubscribeMessage('balloon:pop')
+  async handleBalloonPop(client: AppSocket): Promise<Ack> {
+    const { roomId, nickname } = client.data;
+    if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
+    if (!nickname) return this.fail(client, ERROR_CODES.NOT_YOUR_TURN); // host·미입장은 턴 없음
+
+    try {
+      const popped = await this.gameService.popBalloon(roomId, nickname);
+      this.server.to(roomId).emit('balloon:popped', popped);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof GameError) return this.fail(client, err.code);
+      throw err;
+    }
+  }
+
+  /**
    * host 전용 액션 공통 래퍼.
    * roomId 유무·host 여부를 검증하고, 서비스가 던지는 GameError(code)를
    * error 이벤트 + ack 로 변환한다. 예상 못 한 오류는 그대로 던져 상위에서 로깅되게 둔다.

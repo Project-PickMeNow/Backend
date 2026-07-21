@@ -8,6 +8,8 @@ export const ERROR_CODES = {
   NEED_MORE_ITEMS: 'NEED_MORE_ITEMS', // 항목 2개 미만
   GAME_RUNNING: 'GAME_RUNNING', // 이미 게임 진행 중
   ALREADY_PICKED: 'ALREADY_PICKED', // 제비뽑기 — 참가자가 이미 1개를 뽑음(1인 1제비)
+  NEED_MORE_PLAYERS: 'NEED_MORE_PLAYERS', // 풍선 등 턴제 게임에 참가자가 부족함
+  NOT_YOUR_TURN: 'NOT_YOUR_TURN', // 풍선 — 자기 턴이 아닌데 터뜨림
   ROOM_LOCKED: 'ROOM_LOCKED', // 게임 진행 중이라 신규 입장 불가
   VALIDATION_ERROR: 'VALIDATION_ERROR', // 필드 누락·형식 오류
 } as const;

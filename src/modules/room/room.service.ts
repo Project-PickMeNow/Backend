@@ -182,6 +182,7 @@ export class RoomService {
       revealedRaw,
       drawRaw,
       drawPicks,
+      balloonRaw,
     ] = await Promise.all([
       this.redis.client.hgetall(RedisKeys.room(roomId)),
       this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
@@ -190,6 +191,7 @@ export class RoomService {
       this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
       this.redis.client.get(RedisKeys.gameDraw(roomId)),
       this.redis.client.hgetall(RedisKeys.gameDrawPicks(roomId)),
+      this.redis.client.get(RedisKeys.gameBalloon(roomId)),
     ]);
 
     const ladderSnapshot = this.parseLadder(ladderRaw);
@@ -210,6 +212,7 @@ export class RoomService {
         .map((s) => Number(s))
         .filter((n) => Number.isInteger(n)),
       draw: this.parseDraw(drawRaw, drawPicks),
+      balloon: this.parseBalloon(balloonRaw),
     };
   }
 
@@ -227,13 +230,45 @@ export class RoomService {
         count: number;
         blanks: number;
         blankSet: number[];
+        perPick?: number;
       };
       const picks = Object.entries(picksHash).map(([i, by]) => ({
         index: Number(i),
         by,
         blank: round.blankSet.includes(Number(i)),
       }));
-      return { count: round.count, blanks: round.blanks, picks };
+      return {
+        count: round.count,
+        blanks: round.blanks,
+        perPick: round.perPick ?? 1,
+        picks,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 저장된 풍선 게임 상태를 room:state.balloon 으로 조립한다. 없거나 깨지면 null.
+   * burstAt(터지는 순번)은 절대 밖으로 내보내지 않는다 — 걸린 뒤엔 caughtBy 로만 드러난다.
+   */
+  private parseBalloon(raw: string | null): RoomStatePayload['balloon'] {
+    if (!raw) return null;
+    try {
+      const s = JSON.parse(raw) as {
+        capacity: number;
+        pumps: number;
+        turnOrder: string[];
+        turnIndex: number;
+        caughtBy: string | null;
+      };
+      return {
+        capacity: s.capacity,
+        pumps: s.pumps ?? 0,
+        turnOrder: s.turnOrder ?? [],
+        turn: s.caughtBy ? null : (s.turnOrder?.[s.turnIndex] ?? null),
+        caughtBy: s.caughtBy ?? null,
+      };
     } catch {
       return null;
     }
@@ -336,6 +371,7 @@ export class RoomService {
       .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameDraw(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameDrawPicks(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameBalloon(roomId), this.ttlSeconds)
       .exec();
   }
 
@@ -380,6 +416,9 @@ export class RoomService {
       RedisKeys.gameVotes(roomId),
       RedisKeys.gameLadder(roomId),
       RedisKeys.gameLadderRevealed(roomId),
+      RedisKeys.gameDraw(roomId),
+      RedisKeys.gameDrawPicks(roomId),
+      RedisKeys.gameBalloon(roomId),
     );
   }
 

@@ -104,13 +104,13 @@ describe('RoomService', () => {
       expect(hash.items).toBe('[]');
     });
 
-    it('정원을 안 주면 기본 200 으로 저장한다', async () => {
+    it('정원을 안 주면 기본 12 로 저장한다(게임 미선택 기본값)', async () => {
       await service.createRoom({});
       const [, hash] = multiMock.hset.mock.calls[0] as [
         string,
         Record<string, string>,
       ];
-      expect(hash.maxParticipants).toBe('200');
+      expect(hash.maxParticipants).toBe('12');
     });
 
     it('호스트가 정한 정원을 저장한다', async () => {
@@ -122,13 +122,13 @@ describe('RoomService', () => {
       expect(hash.maxParticipants).toBe('30');
     });
 
-    it('정원은 하드 상한 200 을 넘지 못한다(클램프)', async () => {
+    it('정원은 하드 상한 50 을 넘지 못한다(클램프)', async () => {
       await service.createRoom({ maxParticipants: 9999 });
       const [, hash] = multiMock.hset.mock.calls[0] as [
         string,
         Record<string, string>,
       ];
-      expect(hash.maxParticipants).toBe('200');
+      expect(hash.maxParticipants).toBe('50');
     });
 
     it('누적 통계 카운터를 올린다', async () => {

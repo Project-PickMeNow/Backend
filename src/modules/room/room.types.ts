@@ -23,6 +23,7 @@ export interface RoomStatePayload {
   participants: string[]; // 닉네임 목록
   participantCount: number;
   onlineCount: number; // 이 방에 연결된 소켓 수(닉네임 확정 전 포함)
+  maxParticipants: number; // 방 정원(호스트 설정, 기본 200)
 }
 
 /** 입·퇴장 시 방 전체에 broadcast (participant:joined / participant:left) */

@@ -31,5 +31,6 @@ export interface RoomHash {
   status: 'waiting' | 'playing' | 'finished';
   gameType: string; // 미선택이면 빈 문자열 (Redis Hash 에 null 을 못 넣는다)
   items: string; // JSON 배열 문자열
+  maxParticipants: string; // 방 정원(숫자 문자열, 기본 200)
   createdAt: string; // ISO 8601
 }

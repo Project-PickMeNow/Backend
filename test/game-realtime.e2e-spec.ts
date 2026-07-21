@@ -241,24 +241,36 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  it('사다리: 시작하기(build) 시 전원이 같은 사다리를 받는다', async () => {
+  // 사다리 화면은 방 items 흐름과 분리돼, 호스트가 build 때 칸마다 상단(이름)·하단(당첨항목)을 보낸다.
+  const TOP = ['가위', '바위', '보'];
+  const BOTTOM = ['꽝', '당첨', '한번더'];
+  const buildPayload = { topLabels: TOP, bottomLabels: BOTTOM };
+
+  type BuiltPayload = {
+    ladder: { columns: number; mapping: number[]; rungs: unknown[] };
+    topLabels: string[];
+    bottomLabels: string[];
+  };
+  type RevealedPayload = {
+    topIndex: number;
+    bottomIndex: number;
+    topLabel: string;
+    bottomLabel: string;
+  };
+
+  it('사다리: 시작하기(build) 시 전원이 같은 사다리·상하단 라벨을 받는다', async () => {
     const { host, guest } = await setupGame('ladder');
     try {
-      const hb = once<{
-        ladder: { columns: number; mapping: number[]; rungs: unknown[] };
-        labels: string[];
-      }>(host, 'ladder:built');
-      const gb = once<{
-        ladder: { columns: number; mapping: number[]; rungs: unknown[] };
-        labels: string[];
-      }>(guest, 'ladder:built');
+      const hb = once<BuiltPayload>(host, 'ladder:built');
+      const gb = once<BuiltPayload>(guest, 'ladder:built');
 
-      const ack = (await host.emitWithAck('ladder:build', {})) as Ack;
+      const ack = (await host.emitWithAck('ladder:build', buildPayload)) as Ack;
       expect(ack).toEqual({ ok: true });
 
       const [h, g] = await Promise.all([hb, gb]);
-      expect(h.ladder.columns).toBe(3); // 항목 3개 = 3칸
-      expect(h.labels).toEqual(['짜장', '짬뽕', '볶음밥']);
+      expect(h.ladder.columns).toBe(3); // 칸 3개
+      expect(h.topLabels).toEqual(TOP);
+      expect(h.bottomLabels).toEqual(BOTTOM);
       // 서버가 한 번 만든 동일한 사다리(구조·매핑)를 전원이 받는다.
       expect(h.ladder.mapping).toEqual(g.ladder.mapping);
       expect(h.ladder.rungs).toEqual(g.ladder.rungs);
@@ -268,25 +280,26 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  it('사다리: 늦게 들어온 참가자도 room:state 로 현재 사다리를 복원받는다', async () => {
+  it('사다리: 늦게 들어온 참가자도 room:state 로 현재 사다리·라벨을 복원받는다', async () => {
     const { roomId, host, guest } = await setupGame('ladder');
     try {
-      const built = once<{ ladder: { mapping: number[]; columns: number } }>(
-        host,
-        'ladder:built',
-      );
-      await host.emitWithAck('ladder:build', {});
+      const built = once<BuiltPayload>(host, 'ladder:built');
+      await host.emitWithAck('ladder:build', buildPayload);
       const { ladder } = await built;
 
-      // 사다리가 만들어진 뒤 접속하는 '늦은' 참가자 — room:state 에 사다리가 실려야 한다.
+      // 사다리가 만들어진 뒤 접속하는 '늦은' 참가자 — room:state 에 사다리·라벨이 실려야 한다.
       const late = connect(roomId);
       try {
         const state = await once<{
           ladder: { mapping: number[]; columns: number } | null;
+          ladderTopLabels: string[];
+          ladderBottomLabels: string[];
         }>(late, 'room:state');
         expect(state.ladder).not.toBeNull();
         expect(state.ladder!.mapping).toEqual(ladder.mapping);
         expect(state.ladder!.columns).toBe(ladder.columns);
+        expect(state.ladderTopLabels).toEqual(TOP);
+        expect(state.ladderBottomLabels).toEqual(BOTTOM);
       } finally {
         late.disconnect();
       }
@@ -296,29 +309,22 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  it('사다리: 시작칸 공개(reveal)를 전원이 같은 도착으로 본다', async () => {
+  it('사다리: 시작칸 공개(reveal)를 전원이 같은 도착·라벨로 본다', async () => {
     const { host, guest } = await setupGame('ladder');
     try {
-      const built = once<{ ladder: { mapping: number[] } }>(
-        host,
-        'ladder:built',
-      );
-      await host.emitWithAck('ladder:build', {});
+      const built = once<BuiltPayload>(host, 'ladder:built');
+      await host.emitWithAck('ladder:build', buildPayload);
       const { ladder } = await built;
 
-      const hr = once<{ topIndex: number; bottomIndex: number; label: string }>(
-        host,
-        'ladder:revealed',
-      );
-      const gr = once<{ topIndex: number; bottomIndex: number; label: string }>(
-        guest,
-        'ladder:revealed',
-      );
+      const hr = once<RevealedPayload>(host, 'ladder:revealed');
+      const gr = once<RevealedPayload>(guest, 'ladder:revealed');
       await host.emitWithAck('ladder:reveal', { topIndex: 0 });
 
       const [h, g] = await Promise.all([hr, gr]);
       expect(h.topIndex).toBe(0);
       expect(h.bottomIndex).toBe(ladder.mapping[0]); // 서버 매핑과 일치
+      expect(h.topLabel).toBe(TOP[0]);
+      expect(h.bottomLabel).toBe(BOTTOM[ladder.mapping[0]]);
       expect(h).toEqual(g); // 전원 동일
     } finally {
       host.disconnect();
@@ -326,28 +332,67 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  it('사다리: 항목을 바꾸고 다시 build 하면 칸 수와 라벨이 어긋나지 않는다', async () => {
-    const { host, guest } = await setupGame('ladder'); // 항목 3개
+  it('사다리: 결과 보기(result)로 전체 매칭을 전원이 동시에 받는다', async () => {
+    const { host, guest } = await setupGame('ladder');
     try {
-      const first = once<{ ladder: { columns: number }; labels: string[] }>(
-        host,
-        'ladder:built',
-      );
-      await host.emitWithAck('ladder:build', {});
+      const built = once<BuiltPayload>(host, 'ladder:built');
+      await host.emitWithAck('ladder:build', buildPayload);
+      const { ladder } = await built;
+
+      const hr = once<{ pairs: RevealedPayload[] }>(host, 'ladder:result');
+      const gr = once<{ pairs: RevealedPayload[] }>(guest, 'ladder:result');
+      const ack = (await host.emitWithAck('ladder:result')) as Ack;
+      expect(ack).toEqual({ ok: true });
+
+      const [h, g] = await Promise.all([hr, gr]);
+      expect(h.pairs).toHaveLength(3); // 칸마다 한 쌍
+      // 시작칸 순서대로, 서버 매핑과 라벨이 일치.
+      h.pairs.forEach((p, i) => {
+        expect(p.topIndex).toBe(i);
+        expect(p.bottomIndex).toBe(ladder.mapping[i]);
+        expect(p.topLabel).toBe(TOP[i]);
+        expect(p.bottomLabel).toBe(BOTTOM[ladder.mapping[i]]);
+      });
+      expect(h.pairs).toEqual(g.pairs); // 전원 동일
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 라벨을 바꾸고 다시 build 하면 칸 수·라벨이 새로 반영된다', async () => {
+    const { host, guest } = await setupGame('ladder');
+    try {
+      const first = once<BuiltPayload>(host, 'ladder:built');
+      await host.emitWithAck('ladder:build', buildPayload);
       const built1 = await first;
       expect(built1.ladder.columns).toBe(3);
-      expect(built1.labels).toHaveLength(3);
+      expect(built1.topLabels).toHaveLength(3);
 
-      // 항목 하나 추가(4개) 후 다시 build → 새 사다리(4칸)로 재생성, 라벨도 4개.
-      await host.emitWithAck('item:add', { label: '탕수육' });
-      const second = once<{ ladder: { columns: number }; labels: string[] }>(
-        host,
-        'ladder:built',
-      );
-      await host.emitWithAck('ladder:build', {});
+      // 칸 하나 늘려(4칸) 다시 build → 새 사다리(4칸)로 재생성, 상·하단 라벨도 4개.
+      const second = once<BuiltPayload>(host, 'ladder:built');
+      await host.emitWithAck('ladder:build', {
+        topLabels: [...TOP, '주먹'],
+        bottomLabels: [...BOTTOM, '꽝'],
+      });
       const built2 = await second;
       expect(built2.ladder.columns).toBe(4);
-      expect(built2.labels).toHaveLength(4); // 칸 수 == 라벨 수 (어긋남 없음)
+      expect(built2.topLabels).toHaveLength(4);
+      expect(built2.bottomLabels).toHaveLength(4); // 칸 수 == 라벨 수 (어긋남 없음)
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 상·하단 칸 수가 다르면 거부한다 (NEED_MORE_ITEMS)', async () => {
+    const { host, guest } = await setupGame('ladder');
+    try {
+      const ack = (await host.emitWithAck('ladder:build', {
+        topLabels: ['가위', '바위', '보'],
+        bottomLabels: ['꽝', '당첨'], // 2개뿐 — 칸 수 불일치
+      })) as Ack;
+      expect(ack).toEqual({ ok: false, code: 'NEED_MORE_ITEMS' });
     } finally {
       host.disconnect();
       guest.disconnect();
@@ -357,7 +402,10 @@ describe('GameGateway 게임 관통 (e2e)', () => {
   it('사다리: 참가자는 build·reveal 할 수 없다 (NOT_HOST)', async () => {
     const { host, guest } = await setupGame('ladder');
     try {
-      const ack = (await guest.emitWithAck('ladder:build', {})) as Ack;
+      const ack = (await guest.emitWithAck(
+        'ladder:build',
+        buildPayload,
+      )) as Ack;
       expect(ack).toEqual({ ok: false, code: 'NOT_HOST' });
     } finally {
       host.disconnect();

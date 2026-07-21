@@ -159,12 +159,22 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
-  /** host 사다리 생성('시작하기') — 구조를 만들어 전원에게 broadcast(같은 사다리를 그린다). */
+  /**
+   * host 사다리 생성('사다리 시작') — 칸마다의 상단(이름)·하단(당첨항목) 라벨을 받아
+   * 서버가 가로줄을 무작위 생성하고 구조를 전원에게 broadcast(같은 사다리를 그린다).
+   */
   @SubscribeMessage('ladder:build')
-  async handleLadderBuild(client: AppSocket): Promise<Ack> {
+  async handleLadderBuild(
+    client: AppSocket,
+    payload: { topLabels?: string[]; bottomLabels?: string[] },
+  ): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
-      const payload = await this.gameService.buildLadder(roomId);
-      this.server.to(roomId).emit('ladder:built', payload);
+      const built = await this.gameService.buildLadder(
+        roomId,
+        payload?.topLabels ?? [],
+        payload?.bottomLabels ?? [],
+      );
+      this.server.to(roomId).emit('ladder:built', built);
     });
   }
 
@@ -180,6 +190,15 @@ export class GameGateway implements OnGatewayDisconnect {
         payload?.topIndex ?? -1,
       );
       this.server.to(roomId).emit('ladder:revealed', revealed);
+    });
+  }
+
+  /** host '결과 보기' — 전체 매칭을 계산해 전원에게 broadcast(모달을 동시에 연다). */
+  @SubscribeMessage('ladder:result')
+  async handleLadderResult(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const result = await this.gameService.resultLadder(roomId);
+      this.server.to(roomId).emit('ladder:result', result);
     });
   }
 

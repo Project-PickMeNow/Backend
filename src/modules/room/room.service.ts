@@ -176,7 +176,8 @@ export class RoomService {
       onlineCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
       ladder: ladderSnapshot.ladder,
-      ladderLabels: ladderSnapshot.labels,
+      ladderTopLabels: ladderSnapshot.topLabels,
+      ladderBottomLabels: ladderSnapshot.bottomLabels,
       ladderRevealed: revealedRaw
         .map((s) => Number(s))
         .filter((n) => Number.isInteger(n)),
@@ -184,22 +185,29 @@ export class RoomService {
   }
 
   /**
-   * 저장된 사다리 스냅샷(구조 + 라벨)을 안전하게 파싱한다. 없거나 깨지면 빈 값.
-   * game:{id}:ladder 에는 LadderBuiltPayload({ ladder, labels }) 가 통째로 들어있다.
+   * 저장된 사다리 스냅샷(구조 + 상·하단 라벨)을 안전하게 파싱한다. 없거나 깨지면 빈 값.
+   * game:{id}:ladder 에는 LadderBuiltPayload({ ladder, topLabels, bottomLabels }) 가 통째로 들어있다.
    */
   private parseLadder(raw: string | null): {
     ladder: RoomStatePayload['ladder'];
-    labels: string[];
+    topLabels: string[];
+    bottomLabels: string[];
   } {
-    if (!raw) return { ladder: null, labels: [] };
+    const empty = { ladder: null, topLabels: [], bottomLabels: [] };
+    if (!raw) return empty;
     try {
       const built = JSON.parse(raw) as {
         ladder: RoomStatePayload['ladder'];
-        labels?: string[];
+        topLabels?: string[];
+        bottomLabels?: string[];
       };
-      return { ladder: built.ladder ?? null, labels: built.labels ?? [] };
+      return {
+        ladder: built.ladder ?? null,
+        topLabels: built.topLabels ?? [],
+        bottomLabels: built.bottomLabels ?? [],
+      };
     } catch {
-      return { ladder: null, labels: [] };
+      return empty;
     }
   }
 

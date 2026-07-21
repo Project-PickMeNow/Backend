@@ -6,6 +6,7 @@ import { StatsService } from '../stats/stats.service';
 import { CreateRoomDto, CreateRoomResponse } from './dto/create-room.dto';
 import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
+import { RoomStatePayload } from './room.types';
 
 /**
  * 방 서비스 — 방 생성/조회.
@@ -102,6 +103,130 @@ export class RoomService {
       gameType: room.gameType || null,
       participantCount,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 실시간(WebSocket) 지원 — RoomGateway 가 호출. Redis 조작만 담당하고,
+  // socket.join·broadcast 같은 소켓 기계장치는 게이트웨이가 맡는다.
+  // ─────────────────────────────────────────────────────────────
+
+  /** 방 존재 여부 (connection 검증용) */
+  async roomExists(roomId: string): Promise<boolean> {
+    return (await this.redis.client.exists(RedisKeys.room(roomId))) === 1;
+  }
+
+  /** hostToken 이 이 방의 것과 일치하는지 (host 역할 판별) */
+  async isHost(
+    roomId: string,
+    hostToken: string | undefined,
+  ): Promise<boolean> {
+    if (!hostToken) return false;
+    const stored = await this.redis.client.hget(
+      RedisKeys.room(roomId),
+      'hostToken',
+    );
+    return stored !== null && stored === hostToken;
+  }
+
+  /** connection 직후 접속자에게 보낼 방 전체 스냅샷 */
+  async getRoomState(roomId: string): Promise<RoomStatePayload> {
+    const [room, participants, onlineCount] = await Promise.all([
+      this.redis.client.hgetall(RedisKeys.room(roomId)),
+      this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+      this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
+    ]);
+
+    return {
+      roomId,
+      title: room.title ?? '',
+      status: room.status ?? 'waiting',
+      gameType: room.gameType || null,
+      items: this.parseItems(room.items),
+      participants,
+      participantCount: participants.length,
+      onlineCount,
+    };
+  }
+
+  /**
+   * 참가자 입장 — 닉네임을 players Set 에 추가.
+   * SADD 반환값(1=새로 추가, 0=이미 존재)으로 닉네임 중복을 원자적으로 판별한다.
+   * added=false 면 게이트웨이가 NICKNAME_TAKEN 을 돌려준다.
+   */
+  async addParticipant(
+    roomId: string,
+    nickname: string,
+  ): Promise<{
+    added: boolean;
+    participants: string[];
+    participantCount: number;
+  }> {
+    const added =
+      (await this.redis.client.sadd(
+        RedisKeys.roomPlayers(roomId),
+        nickname,
+      )) === 1;
+
+    if (added) {
+      await this.stats.incrementParticipants();
+    }
+
+    const participants = await this.redis.client.smembers(
+      RedisKeys.roomPlayers(roomId),
+    );
+    return { added, participants, participantCount: participants.length };
+  }
+
+  /** 참가자 퇴장 — players Set 에서 제거 */
+  async removeParticipant(
+    roomId: string,
+    nickname: string,
+  ): Promise<{ participants: string[]; participantCount: number }> {
+    await this.redis.client.srem(RedisKeys.roomPlayers(roomId), nickname);
+    const participants = await this.redis.client.smembers(
+      RedisKeys.roomPlayers(roomId),
+    );
+    return { participants, participantCount: participants.length };
+  }
+
+  /** 소켓 접속 등록 → 이 방의 현재 접속 소켓 수 반환 */
+  async addOnline(roomId: string, socketId: string): Promise<number> {
+    const key = RedisKeys.onlineRoom(roomId);
+    await this.redis.client.sadd(key, socketId);
+    // 방이 사라지면 이 Set 도 같이 정리되도록 방 TTL 과 같은 수명을 준다.
+    await this.redis.client.expire(key, this.ttlSeconds);
+    await this.redis.client.incr(RedisKeys.onlineCount()); // 서비스 전체 접속자(대시보드용)
+    return this.redis.client.scard(key);
+  }
+
+  /** 소켓 접속 해제 → 이 방의 남은 접속 소켓 수 반환 */
+  async removeOnline(roomId: string, socketId: string): Promise<number> {
+    await this.redis.client.srem(RedisKeys.onlineRoom(roomId), socketId);
+    // 전체 카운터가 음수로 내려가지 않도록 0 에서 멈춘다.
+    const total = await this.redis.client.decr(RedisKeys.onlineCount());
+    if (total < 0) await this.redis.client.set(RedisKeys.onlineCount(), '0');
+    return this.redis.client.scard(RedisKeys.onlineRoom(roomId));
+  }
+
+  /** host 방 종료 — 이 방과 관련된 Redis 키를 모두 삭제 */
+  async closeRoom(roomId: string): Promise<void> {
+    await this.redis.client.del(
+      RedisKeys.room(roomId),
+      RedisKeys.roomPlayers(roomId),
+      RedisKeys.onlineRoom(roomId),
+      RedisKeys.gameResult(roomId),
+    );
+  }
+
+  /** items 필드(JSON 문자열)를 안전하게 배열로 파싱한다. 깨져 있으면 빈 배열. */
+  private parseItems(raw: string | undefined): string[] {
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   /** 아직 쓰이지 않는 roomId 를 뽑는다. */

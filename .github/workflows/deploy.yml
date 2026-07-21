@@ -13,11 +13,23 @@ name: Deploy to EC2
 # └────────────────────────────────────────────────────────────────────────────┘
 # 서버에는 사전에 docker / docker compose 설치 + ~/app 디렉터리 + .env 배치가 필요하다.
 # 레포 루트에는 Dockerfile 과 docker-compose.prod.yml 이 있어야 한다.
+#
+# ⚠️ Phase 4 까지 자동 배포를 꺼 둔다 (수동 실행만 가능).
+#    이유: 바로 위 전제인 Dockerfile · docker-compose.prod.yml 이 아직 레포에 없다.
+#          이 상태로 자동 트리거를 켜 두면 main 에 머지될 때마다 CI 성공 직후 배포가 돌고
+#          Docker 빌드 단계에서 반드시 실패해, 진짜 배포 실패와 구분이 안 된다.
+#    개발계획서 기준 Phase 1~3 배포는 관리형(https 기본)을 쓰고, EC2 는 Phase 4 에서 다룬다.
+#
+#    [Phase 4 재활성화 방법]
+#      1) 아래 workflow_dispatch 를 지우고 주석 처리된 workflow_run 블록을 되살린다.
+#      2) deploy 잡의 CI 성공 게이팅 if 조건(주석 처리됨)도 함께 되살린다.
+#      3) Dockerfile 과 docker-compose.prod.yml 을 레포 루트에 추가한다.
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
+  # workflow_run:
+  #   workflows: ["CI"]
+  #   types: [completed]
+  #   branches: [main]
 
 permissions:
   contents: read
@@ -30,14 +42,15 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # CI 결론이 success일 때만 배포 (실패/취소 시 차단)
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # (Phase 4 재활성화 시 되살릴 것) CI 결론이 success일 때만 배포 — 실패/취소 시 차단
+    # if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout (CI가 검증한 정확한 커밋)
+        # workflow_run 일 땐 CI가 검증한 커밋, 수동 실행일 땐 실행 시점 커밋을 쓴다.
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Docker Hub 로그인
         uses: docker/login-action@v3
@@ -53,7 +66,7 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/siheung-backend:latest
-            ${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha }}
+            ${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: EC2에 compose 파일 복사
         uses: appleboy/scp-action@v0.1.7
@@ -74,7 +87,7 @@ jobs:
             set -euo pipefail
             cd ~/app
             # 이번에 푸시한 이미지 태그를 .env 에 갱신 (중복 라인 없이 교체)
-            IMAGE="${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha }}"
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha || github.sha }}"
             touch .env
             sed -i '/^DOCKER_IMAGE=/d' .env
             echo "DOCKER_IMAGE=${IMAGE}" >> .env

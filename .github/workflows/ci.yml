@@ -48,10 +48,13 @@ jobs:
           --health-retries=3
 
     env:
-      # 앱이 읽을 접속 정보. 실제 환경변수명은 프로젝트 설정에 맞게 조정하세요.
+      # 앱이 실제로 읽는 환경변수명과 1:1로 맞춘다 (.env.example 참고).
+      # RedisService 는 REDIS_URL 이 아니라 REDIS_HOST/REDIS_PORT 를 읽는다.
       NODE_ENV: test
       DATABASE_URL: postgres://siheung:siheung@localhost:5432/siheung_test
-      REDIS_URL: redis://localhost:6379
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      FRONTEND_BASE_URL: http://localhost:5173
 
     steps:
       - name: Checkout
@@ -66,6 +69,15 @@ jobs:
       # package-lock.json 기준 재현 가능한 설치. lock 파일이 있어야 통과.
       - name: Install dependencies
         run: npm ci
+
+      # 타입체크(lint·build)가 Prisma Client 타입을 필요로 하고,
+      # e2e 는 서비스 컨테이너의 빈 DB 에 실제 테이블이 있어야 돈다.
+      # migrate deploy 는 개발용 migrate dev 와 달리 스키마를 새로 만들지 않고
+      # 커밋된 마이그레이션만 그대로 적용한다.
+      - name: Prisma generate + migrate
+        run: |
+          npx prisma generate
+          npx prisma migrate deploy
 
       - name: Lint
         run: npm run lint

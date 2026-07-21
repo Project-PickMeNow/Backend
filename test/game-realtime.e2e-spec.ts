@@ -188,14 +188,14 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  /** 항목 3개 추가 + gameType 선택까지 끝낸 뒤 host·guest 를 돌려주는 헬퍼 */
+  /** 항목 3개 추가 + gameType 선택까지 끝낸 뒤 roomId·host·guest 를 돌려주는 헬퍼 */
   const setupGame = async (gameType: string) => {
-    const { host, guest } = await setup();
+    const { roomId, host, guest } = await setup();
     await host.emitWithAck('item:add', { label: '짜장' });
     await host.emitWithAck('item:add', { label: '짬뽕' });
     await host.emitWithAck('item:add', { label: '볶음밥' });
     await host.emitWithAck('game:select', { gameType });
-    return { host, guest };
+    return { roomId, host, guest };
   };
 
   it('슬롯: host·참가자가 동시에 같은 당첨을 본다', async () => {
@@ -262,6 +262,34 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       // 서버가 한 번 만든 동일한 사다리(구조·매핑)를 전원이 받는다.
       expect(h.ladder.mapping).toEqual(g.ladder.mapping);
       expect(h.ladder.rungs).toEqual(g.ladder.rungs);
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 늦게 들어온 참가자도 room:state 로 현재 사다리를 복원받는다', async () => {
+    const { roomId, host, guest } = await setupGame('ladder');
+    try {
+      const built = once<{ ladder: { mapping: number[]; columns: number } }>(
+        host,
+        'ladder:built',
+      );
+      await host.emitWithAck('ladder:build', {});
+      const { ladder } = await built;
+
+      // 사다리가 만들어진 뒤 접속하는 '늦은' 참가자 — room:state 에 사다리가 실려야 한다.
+      const late = connect(roomId);
+      try {
+        const state = await once<{
+          ladder: { mapping: number[]; columns: number } | null;
+        }>(late, 'room:state');
+        expect(state.ladder).not.toBeNull();
+        expect(state.ladder!.mapping).toEqual(ladder.mapping);
+        expect(state.ladder!.columns).toBe(ladder.columns);
+      } finally {
+        late.disconnect();
+      }
     } finally {
       host.disconnect();
       guest.disconnect();

@@ -153,13 +153,16 @@ export class RoomService {
     return stored !== null && stored === hostToken;
   }
 
-  /** connection 직후 접속자에게 보낼 방 전체 스냅샷 */
+  /** connection 직후 접속자에게 보낼 방 전체 스냅샷 (진행 중 사다리 포함 — 재접속·늦은 입장 복원) */
   async getRoomState(roomId: string): Promise<RoomStatePayload> {
-    const [room, participants, onlineCount] = await Promise.all([
-      this.redis.client.hgetall(RedisKeys.room(roomId)),
-      this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
-      this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
-    ]);
+    const [room, participants, onlineCount, ladderRaw, revealedRaw] =
+      await Promise.all([
+        this.redis.client.hgetall(RedisKeys.room(roomId)),
+        this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+        this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
+        this.redis.client.get(RedisKeys.gameLadder(roomId)),
+        this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
+      ]);
 
     return {
       roomId,
@@ -171,7 +174,21 @@ export class RoomService {
       participantCount: participants.length,
       onlineCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
+      ladder: this.parseLadder(ladderRaw),
+      ladderRevealed: revealedRaw
+        .map((s) => Number(s))
+        .filter((n) => Number.isInteger(n)),
     };
+  }
+
+  /** 사다리 구조 JSON 을 안전하게 파싱한다. 없거나 깨지면 null. */
+  private parseLadder(raw: string | null): RoomStatePayload['ladder'] {
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as RoomStatePayload['ladder'];
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -130,7 +130,12 @@ describe('투표 관통 (e2e)', () => {
   it('한 명이 표를 바꾸면 중복 없이 이동한다 (1인 1표)', async () => {
     const { host, g1, g2, items } = await setupVote();
     try {
+      // 첫 표의 broadcast 가 g2 에 도착할 때까지 기다린 뒤(배수) 다음을 구독해야
+      // once 가 첫 broadcast 를 잘못 잡는 레이스를 피한다.
+      const first = once(g2, 'vote:updated');
       await g1.emitWithAck('vote:cast', { itemId: items[0].id }); // 짜장
+      await first;
+
       const changed = once<{ tally: TallyEntry[] }>(g2, 'vote:updated');
       await g1.emitWithAck('vote:cast', { itemId: items[1].id }); // 짬뽕으로 변경
 
@@ -139,6 +144,48 @@ describe('투표 관통 (e2e)', () => {
       expect(total).toBe(1); // 여전히 1표 (중복 아님)
       expect(tally.find((t) => t.item.id === items[1].id)!.count).toBe(1);
       expect(tally.find((t) => t.item.id === items[0].id)!.count).toBe(0);
+    } finally {
+      [host, g1, g2].forEach((s) => s.disconnect());
+    }
+  });
+
+  it('닉네임을 바꿔 재입장해도 한 소켓은 1표만 갖는다 (중복 투표 방지)', async () => {
+    const { host, g1, g2, items } = await setupVote();
+    try {
+      const first = once(g2, 'vote:updated');
+      await g1.emitWithAck('vote:cast', { itemId: items[0].id }); // '지민'으로 투표
+      await first; // 첫 broadcast 배수
+      // 닉네임을 바꿔 다시 입장한 뒤 다른 항목에 또 투표 시도
+      await g1.emitWithAck('room:join', { nickname: '지민2' });
+      const seen = once<{ tally: TallyEntry[] }>(g2, 'vote:updated');
+      await g1.emitWithAck('vote:cast', { itemId: items[1].id });
+
+      const { tally } = await seen;
+      const total = tally.reduce((s, t) => s + t.count, 0);
+      expect(total).toBe(1); // 두 번 던졌지만 같은 소켓이라 1표
+    } finally {
+      [host, g1, g2].forEach((s) => s.disconnect());
+    }
+  });
+
+  it('투표한 소켓이 끊기면 그 표가 집계에서 빠진다', async () => {
+    const { host, g1, g2, items } = await setupVote();
+    try {
+      // 두 표의 broadcast 를 host 가 모두 받을 때까지 배수한 뒤 disconnect 를 관측한다.
+      const h1 = once(host, 'vote:updated');
+      await g1.emitWithAck('vote:cast', { itemId: items[0].id });
+      await h1;
+      const h2 = once(host, 'vote:updated');
+      await g2.emitWithAck('vote:cast', { itemId: items[1].id });
+      await h2;
+
+      const hostSees = once<{ tally: TallyEntry[] }>(host, 'vote:updated');
+      g1.disconnect(); // 투표자 이탈
+
+      const { tally } = await hostSees;
+      const total = tally.reduce((s, t) => s + t.count, 0);
+      expect(total).toBe(1); // g1 표 빠지고 g2 표만 남음
+      expect(tally.find((t) => t.item.id === items[1].id)!.count).toBe(1);
     } finally {
       [host, g1, g2].forEach((s) => s.disconnect());
     }

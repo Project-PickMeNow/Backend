@@ -135,11 +135,15 @@ export class GameService {
 
   // ── 투표(vote) ────────────────────────────────────────────
   // 룰렛처럼 즉시 끝나지 않고 "참가자가 하나씩 던지고 host 가 마감"하는 흐름이라
-  // 별도 메서드로 둔다. 표는 game:{id}:votes(닉네임→itemId) 에 쌓인다.
+  // 별도 메서드로 둔다. 표는 game:{id}:votes(socket.id→itemId) 에 쌓인다.
+  //
+  // 투표자 키는 닉네임이 아니라 socket.id 다: 닉네임을 키로 쓰면 닉네임만 바꿔
+  // 재입장해 옛 표를 남기는 식으로 중복 투표가 가능하다. socket.id 는 연결당 고정이라
+  // 한 소켓은 1표만 갖고, 끊기면 removeVote 로 정리된다.
 
   /**
    * 참가자 1표 반영 → 갱신된 집계 반환.
-   * 닉네임을 키로 HSET 하므로 한 명당 1표이고, 다시 던지면 표가 이동한다(중복 없음).
+   * voter(=socket.id)를 키로 HSET 하므로 한 소켓당 1표이고, 다시 던지면 표가 이동한다.
    */
   async castVote(
     roomId: string,
@@ -187,9 +191,34 @@ export class GameService {
 
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'finished');
     await this.saveResult(roomId, result);
-    await this.stats.incrementPlays();
+    // host 가 "마감" 을 두 번 눌러도 한 판은 한 판 — finished 로 처음 넘어갈 때만 집계한다.
+    if (room.status !== 'finished') {
+      await this.stats.incrementPlays();
+    }
 
     return result;
+  }
+
+  /**
+   * 소켓이 끊길 때 그 소켓의 표를 지운다 → 표가 실제로 지워졌고 투표 진행 중이면
+   * 갱신된 집계를 반환(게이트웨이가 broadcast), 아니면 null.
+   */
+  async removeVote(
+    roomId: string,
+    voter: string,
+  ): Promise<VoteTallyEntry[] | null> {
+    const removed = await this.redis.client.hdel(
+      RedisKeys.gameVotes(roomId),
+      voter,
+    );
+    if (removed === 0) return null; // 이 소켓은 투표한 적 없음
+
+    const room = await this.redis.client.hgetall(RedisKeys.room(roomId));
+    // 방이 사라졌거나 이미 마감됐으면 굳이 갱신을 쏘지 않는다.
+    if (room.gameType !== 'vote' || room.status === 'finished') return null;
+
+    const items = this.parseItems(room.items);
+    return this.voteEngine.tally(items, await this.loadChoices(roomId));
   }
 
   /** votes 해시의 값(각 투표자가 고른 itemId)만 뽑아온다. */

@@ -14,7 +14,7 @@ export const RedisKeys = {
   /** 게임 결과 (String, JSON) */
   gameResult: (roomId: string) => `game:${roomId}:result`,
 
-  /** 투표 진행 상태 (Hash) — 닉네임 → 선택한 itemId. 한 명당 1표(덮어쓰기=투표 변경). */
+  /** 투표 진행 상태 (Hash) — socket.id → 선택한 itemId. 한 소켓당 1표(덮어쓰기=투표 변경). */
   gameVotes: (roomId: string) => `game:${roomId}:votes`,
 
   /** 전체 접속자 수 (String, 카운터) */

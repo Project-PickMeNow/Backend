@@ -48,7 +48,7 @@ jobs:
     steps:
       - name: Checkout (CI가 검증한 정확한 커밋)
         # workflow_run 일 땐 CI가 검증한 커밋, 수동 실행일 땐 실행 시점 커밋을 쓴다.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 

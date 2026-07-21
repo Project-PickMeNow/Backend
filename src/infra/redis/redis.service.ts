@@ -27,7 +27,14 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    await this._client?.quit();
+    // 종료는 best-effort. 이미 연결이 닫히는 중이면 quit() 이 "Connection is closed" 로
+    // reject 될 수 있는데, 여기서 던지면 앱 종료(테스트의 app.close 포함)가 통째로 실패한다.
+    // 실패해도 강제로 소켓만 끊고 넘어간다.
+    try {
+      await this._client?.quit();
+    } catch {
+      this._client?.disconnect();
+    }
   }
 
   /** 원시 Redis 클라이언트 (서비스에서 직접 명령 실행) */

@@ -23,6 +23,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
 
   catch(exception: unknown, host: ArgumentsHost): void {
+    // 이 필터는 REST 전용. WS 에러는 게이트웨이가 {code} ack 로 이미 처리하므로,
+    // HTTP 가 아닌 컨텍스트(웹소켓 등)에서는 HTTP 응답을 건드리지 않는다(안 그러면 크래시).
+    if (host.getType() !== 'http') {
+      this.logger.error(exception);
+      return;
+    }
+
     const res = host.switchToHttp().getResponse<Response>();
 
     const { status, code, message } = this.resolve(exception);

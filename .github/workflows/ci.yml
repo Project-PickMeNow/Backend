@@ -96,7 +96,7 @@ jobs:
         # jest-junit reporter 가 설정돼 있으면 리포트가 붙는다.
         # 아직 설정 전이면 require_tests:false 라 스킵만 되고 CI 는 녹색 유지.
         if: always()
-        uses: mikepenz/action-junit-report@v4
+        uses: mikepenz/action-junit-report@v6
         with:
           report_paths: '**/junit*.xml'
           check_name: 'Jest Test Report'

@@ -10,13 +10,9 @@ import { configureApp } from './../src/configure-app';
 
 /**
  * 정원 초과(ROOM_FULL) 관통 e2e.
- * 정원을 2 로 낮춰(ROOM_MAX_PARTICIPANTS) 3번째 입장이 거절되는지 본다.
- *
- * 정원 env 는 앱 초기화(beforeAll → createNestApplication) 때 읽히므로, 그 전에 실행되는
- * 이 top-level 대입으로 충분하다. dotenv 는 기존 process.env 를 덮어쓰지 않는다.
+ * 방을 생성할 때 정원을 2 로 지정(POST body maxParticipants)하고 3번째 입장이 거절되는지 본다.
+ * (정원은 이제 방마다 host 가 정하는 per-room 값이다)
  */
-process.env.ROOM_MAX_PARTICIPANTS = '2';
-
 type Ack = { ok: true } | { ok: false; code: string };
 
 describe('정원 초과 ROOM_FULL (e2e)', () => {
@@ -66,7 +62,7 @@ describe('정원 초과 ROOM_FULL (e2e)', () => {
   it('정원(2)이 차면 다음 입장은 ROOM_FULL', async () => {
     const created = await request(app.getHttpServer())
       .post('/api/rooms')
-      .send({ title: '정원 테스트' })
+      .send({ title: '정원 테스트', maxParticipants: 2 })
       .expect(201);
     const { roomId } = (created.body as { data: { roomId: string } }).data;
 

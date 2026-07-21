@@ -6,6 +6,7 @@ import { StatsService } from '../stats/stats.service';
 import { CreateRoomDto, CreateRoomResponse } from './dto/create-room.dto';
 import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
+import { ROOM_CAPACITY } from '../../common/constants/room-capacity';
 import { Item, RoomStatePayload } from './room.types';
 
 /**
@@ -26,8 +27,6 @@ export class RoomService {
 
   private readonly ttlSeconds: number;
   private readonly frontendBaseUrl: string;
-  /** 방 정원(참가자 수 상한). 초과하면 ROOM_FULL. */
-  private readonly maxParticipants: number;
 
   constructor(
     private readonly redis: RedisService,
@@ -41,9 +40,24 @@ export class RoomService {
       'FRONTEND_BASE_URL',
       'http://localhost:5173',
     );
-    this.maxParticipants = Number(
-      this.config.get<string>('ROOM_MAX_PARTICIPANTS', '50'),
+  }
+
+  /** 요청 정원을 정책 범위[MIN, MAX]로 자르고, 없으면 기본값. */
+  private clampCapacity(requested: number | undefined): number {
+    if (requested === undefined || Number.isNaN(requested)) {
+      return ROOM_CAPACITY.DEFAULT;
+    }
+    return Math.min(ROOM_CAPACITY.MAX, Math.max(ROOM_CAPACITY.MIN, requested));
+  }
+
+  /** 방에 저장된 정원. 필드가 없거나 깨졌으면(구버전 방 등) 기본값으로 안전하게 처리. */
+  private async getRoomCapacity(roomId: string): Promise<number> {
+    const raw = await this.redis.client.hget(
+      RedisKeys.room(roomId),
+      'maxParticipants',
     );
+    const parsed = raw === null ? NaN : Number(raw);
+    return Number.isNaN(parsed) ? ROOM_CAPACITY.DEFAULT : parsed;
   }
 
   /** 방 생성 (POST /api/rooms) → Redis 저장 + stats.total_rooms +1 */
@@ -62,6 +76,7 @@ export class RoomService {
         status: 'waiting',
         gameType: dto.gameType ?? '', // Redis Hash 에 null 을 넣을 수 없어 빈 문자열로 둔다
         items: '[]',
+        maxParticipants: String(this.clampCapacity(dto.maxParticipants)),
         createdAt: new Date().toISOString(),
       })
       .expire(key, this.ttlSeconds)
@@ -105,7 +120,14 @@ export class RoomService {
       status: room.status,
       gameType: room.gameType || null,
       participantCount,
+      maxParticipants: this.parseCapacity(room.maxParticipants),
     };
+  }
+
+  /** hgetall 로 읽은 문자열 정원을 숫자로(없거나 깨지면 기본값). */
+  private parseCapacity(raw: string | undefined): number {
+    const parsed = raw === undefined ? NaN : Number(raw);
+    return Number.isNaN(parsed) ? ROOM_CAPACITY.DEFAULT : parsed;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -148,6 +170,7 @@ export class RoomService {
       participants,
       participantCount: participants.length,
       onlineCount,
+      maxParticipants: this.parseCapacity(room.maxParticipants),
     };
   }
 
@@ -171,8 +194,11 @@ export class RoomService {
     // 이미 들어와 있는 닉네임의 재요청은 정원과 무관하게 통과시켜야 한다(정원 체크는 신규만).
     const alreadyIn = (await this.redis.client.sismember(key, nickname)) === 1;
     if (!alreadyIn) {
-      const count = await this.redis.client.scard(key);
-      if (count >= this.maxParticipants) {
+      const [count, cap] = await Promise.all([
+        this.redis.client.scard(key),
+        this.getRoomCapacity(roomId),
+      ]);
+      if (count >= cap) {
         return { status: 'full', participants: [], participantCount: count };
       }
     }

@@ -20,6 +20,7 @@ describe('RoomService', () => {
   let clientMock: {
     multi: jest.Mock;
     exists: jest.Mock;
+    hget: jest.Mock;
     hgetall: jest.Mock;
     scard: jest.Mock;
     sismember: jest.Mock;
@@ -34,6 +35,7 @@ describe('RoomService', () => {
     clientMock = {
       multi: jest.fn(() => multiMock),
       exists: jest.fn().mockResolvedValue(0), // 기본: 충돌 없음
+      hget: jest.fn().mockResolvedValue('3'), // 정원(getRoomCapacity) — 테스트 편의상 3
       hgetall: jest.fn(),
       scard: jest.fn().mockResolvedValue(0),
       sismember: jest.fn().mockResolvedValue(0), // 기본: 새 참가자
@@ -50,7 +52,6 @@ describe('RoomService', () => {
         ({
           ROOM_TTL_SECONDS: '259200',
           FRONTEND_BASE_URL: 'https://example.test',
-          ROOM_MAX_PARTICIPANTS: '3', // 테스트 편의상 낮게
         })[key] ?? fallback,
     };
 
@@ -103,6 +104,33 @@ describe('RoomService', () => {
       expect(hash.items).toBe('[]');
     });
 
+    it('정원을 안 주면 기본 200 으로 저장한다', async () => {
+      await service.createRoom({});
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.maxParticipants).toBe('200');
+    });
+
+    it('호스트가 정한 정원을 저장한다', async () => {
+      await service.createRoom({ maxParticipants: 30 });
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.maxParticipants).toBe('30');
+    });
+
+    it('정원은 하드 상한 200 을 넘지 못한다(클램프)', async () => {
+      await service.createRoom({ maxParticipants: 9999 });
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.maxParticipants).toBe('200');
+    });
+
     it('누적 통계 카운터를 올린다', async () => {
       await service.createRoom({});
 
@@ -137,6 +165,7 @@ describe('RoomService', () => {
         status: 'waiting',
         gameType: 'roulette',
         items: '[]',
+        maxParticipants: '50',
         createdAt: new Date().toISOString(),
       });
       clientMock.scard.mockResolvedValue(3);
@@ -150,6 +179,7 @@ describe('RoomService', () => {
         status: 'waiting',
         gameType: 'roulette',
         participantCount: 3,
+        maxParticipants: 50,
       });
     });
 

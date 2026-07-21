@@ -48,5 +48,13 @@ COPY --from=builder /app/dist ./dist
 ENV PORT=3000
 EXPOSE 3000
 
+# 헬스체크 — /api/health 응답으로 컨테이너 상태 판정(node 20 의 내장 fetch 사용, curl 불필요).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# 루트로 실행하지 않는다(node:20-slim 이 제공하는 비-root 사용자). 파일은 world-readable 이라
+# migrate deploy·앱 실행에 문제없다.
+USER node
+
 # 시작 시: 대기 중인 마이그레이션만 적용(migrate dev 와 달리 스키마를 새로 만들지 않는다) → 앱 실행
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]

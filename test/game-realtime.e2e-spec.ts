@@ -326,6 +326,34 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
+  it('사다리: 항목을 바꾸고 다시 build 하면 칸 수와 라벨이 어긋나지 않는다', async () => {
+    const { host, guest } = await setupGame('ladder'); // 항목 3개
+    try {
+      const first = once<{ ladder: { columns: number }; labels: string[] }>(
+        host,
+        'ladder:built',
+      );
+      await host.emitWithAck('ladder:build', {});
+      const built1 = await first;
+      expect(built1.ladder.columns).toBe(3);
+      expect(built1.labels).toHaveLength(3);
+
+      // 항목 하나 추가(4개) 후 다시 build → 새 사다리(4칸)로 재생성, 라벨도 4개.
+      await host.emitWithAck('item:add', { label: '탕수육' });
+      const second = once<{ ladder: { columns: number }; labels: string[] }>(
+        host,
+        'ladder:built',
+      );
+      await host.emitWithAck('ladder:build', {});
+      const built2 = await second;
+      expect(built2.ladder.columns).toBe(4);
+      expect(built2.labels).toHaveLength(4); // 칸 수 == 라벨 수 (어긋남 없음)
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
   it('사다리: 참가자는 build·reveal 할 수 없다 (NOT_HOST)', async () => {
     const { host, guest } = await setupGame('ladder');
     try {

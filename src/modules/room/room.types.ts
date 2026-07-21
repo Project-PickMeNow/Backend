@@ -27,9 +27,11 @@ export interface RoomStatePayload {
   participantCount: number;
   onlineCount: number; // 이 방에 연결된 소켓 수(닉네임 확정 전 포함)
   maxParticipants: number; // 방 정원(호스트 설정, 기본 200)
-  // 사다리가 진행 중이면 그 구조와 이미 공개된 시작칸들 — 늦게 들어오거나 재접속한
-  // 참가자도 room:state 하나로 현재 사다리를 그대로 복원한다. 사다리 아니면 null·빈 배열.
+  // 사다리가 진행 중이면 그 구조·라벨(build 당시 스냅샷)·이미 공개된 시작칸들 —
+  // 늦게 들어오거나 재접속한 참가자도 room:state 하나로 현재 사다리를 그대로 복원한다.
+  // 사다리 아니면 null·빈 배열.
   ladder: LadderStructure | null;
+  ladderLabels: string[]; // 하단 라벨 스냅샷(칸 수와 항상 일치)
   ladderRevealed: number[];
 }
 

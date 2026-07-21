@@ -164,6 +164,7 @@ export class RoomService {
         this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
       ]);
 
+    const ladderSnapshot = this.parseLadder(ladderRaw);
     return {
       roomId,
       title: room.title ?? '',
@@ -174,20 +175,31 @@ export class RoomService {
       participantCount: participants.length,
       onlineCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
-      ladder: this.parseLadder(ladderRaw),
+      ladder: ladderSnapshot.ladder,
+      ladderLabels: ladderSnapshot.labels,
       ladderRevealed: revealedRaw
         .map((s) => Number(s))
         .filter((n) => Number.isInteger(n)),
     };
   }
 
-  /** 사다리 구조 JSON 을 안전하게 파싱한다. 없거나 깨지면 null. */
-  private parseLadder(raw: string | null): RoomStatePayload['ladder'] {
-    if (!raw) return null;
+  /**
+   * 저장된 사다리 스냅샷(구조 + 라벨)을 안전하게 파싱한다. 없거나 깨지면 빈 값.
+   * game:{id}:ladder 에는 LadderBuiltPayload({ ladder, labels }) 가 통째로 들어있다.
+   */
+  private parseLadder(raw: string | null): {
+    ladder: RoomStatePayload['ladder'];
+    labels: string[];
+  } {
+    if (!raw) return { ladder: null, labels: [] };
     try {
-      return JSON.parse(raw) as RoomStatePayload['ladder'];
+      const built = JSON.parse(raw) as {
+        ladder: RoomStatePayload['ladder'];
+        labels?: string[];
+      };
+      return { ladder: built.ladder ?? null, labels: built.labels ?? [] };
     } catch {
-      return null;
+      return { ladder: null, labels: [] };
     }
   }
 

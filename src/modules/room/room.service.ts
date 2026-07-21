@@ -240,6 +240,8 @@ export class RoomService {
       .expire(RedisKeys.roomPlayers(roomId), this.ttlSeconds)
       .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
       .exec();
   }
 
@@ -282,6 +284,8 @@ export class RoomService {
       RedisKeys.onlineRoom(roomId),
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
+      RedisKeys.gameLadder(roomId),
+      RedisKeys.gameLadderRevealed(roomId),
     );
   }
 

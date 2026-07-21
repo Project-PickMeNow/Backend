@@ -7,9 +7,17 @@ import { ERROR_CODES } from '../../common/constants/error-code';
 import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
 import { RoomService } from '../room/room.service';
-import { GameResult, VoteResult, VoteTallyEntry } from './game.types';
+import {
+  GameResult,
+  LadderBuiltPayload,
+  LadderRevealedPayload,
+  VoteResult,
+  VoteTallyEntry,
+} from './game.types';
 import { ENGINES } from './engines';
 import { VoteEngine } from './engines/vote';
+import { generateLadder } from './engines/ladder';
+import { LADDER } from '../../common/constants/ladder';
 
 /**
  * 도메인 규칙 위반을 나타내는 에러. code 는 ERROR_CODES 의 값이며
@@ -127,14 +135,89 @@ export class GameService {
     return { gameType, result, items };
   }
 
-  /** 한 판 더 — 결과·투표를 지우고 대기 상태로 되돌린다. */
+  /** 한 판 더 — 결과·투표·사다리를 지우고 대기 상태로 되돌린다. */
   async resetGame(roomId: string): Promise<void> {
     await this.loadRoomOrThrow(roomId);
     await this.redis.client.del(
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
+      RedisKeys.gameLadder(roomId),
+      RedisKeys.gameLadderRevealed(roomId),
     );
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
+  }
+
+  // ── 사다리타기 (개수 선택형) ──────────────────────────────
+  // 룰렛/투표와 달리 game:result 로 안 끝난다. 호스트가 사다리를 만들고(build)
+  // 시작점을 하나씩 눌러 공개(reveal)하며, 참가자도 실시간으로 함께 본다.
+  // 하단 라벨은 방 items(호스트가 개수만큼 입력한 결과)를 그대로 쓴다.
+
+  /**
+   * 사다리 생성 — items(=하단 라벨) 수만큼 칸을 만들고 구조를 생성·저장한다.
+   * 이미 만들어져 있으면 그대로 반환(중복 build 시 사다리가 안 바뀌도록).
+   */
+  async buildLadder(roomId: string): Promise<LadderBuiltPayload> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'ladder') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const labels = this.parseItems(room.items).map((it) => it.label);
+    if (labels.length < LADDER.MIN || labels.length > LADDER.MAX) {
+      // 사다리는 2~10칸. 벗어나면 항목 수 문제로 본다.
+      throw new GameError(ERROR_CODES.NEED_MORE_ITEMS);
+    }
+
+    // 이미 만든 사다리가 있으면 재사용(시작하기 여러 번 눌러도 사다리는 고정).
+    const existing = await this.redis.client.get(RedisKeys.gameLadder(roomId));
+    const ladder = existing
+      ? (JSON.parse(existing) as LadderBuiltPayload['ladder'])
+      : generateLadder(labels.length);
+
+    if (!existing) {
+      await this.redis.client.set(
+        RedisKeys.gameLadder(roomId),
+        JSON.stringify(ladder),
+      );
+      await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
+      await this.stats.incrementPlays();
+    }
+    await this.rooms.touchRoom(roomId);
+
+    return { ladder, labels };
+  }
+
+  /**
+   * 시작칸 하나 공개 — 도착칸과 라벨을 돌려주고 공개 목록에 기록한다.
+   * (경로 애니메이션은 프론트가 공유된 사다리 구조로 그린다)
+   */
+  async revealLadder(
+    roomId: string,
+    topIndex: number,
+  ): Promise<LadderRevealedPayload> {
+    const raw = await this.redis.client.get(RedisKeys.gameLadder(roomId));
+    if (!raw) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 안 만듦
+
+    const ladder = JSON.parse(raw) as LadderBuiltPayload['ladder'];
+    if (
+      !Number.isInteger(topIndex) ||
+      topIndex < 0 ||
+      topIndex >= ladder.columns
+    ) {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const bottomIndex = ladder.mapping[topIndex];
+    const room = await this.loadRoomOrThrow(roomId);
+    const labels = this.parseItems(room.items).map((it) => it.label);
+
+    await this.redis.client.sadd(
+      RedisKeys.gameLadderRevealed(roomId),
+      String(topIndex),
+    );
+    await this.rooms.touchRoom(roomId);
+
+    return { topIndex, bottomIndex, label: labels[bottomIndex] ?? '' };
   }
 
   // ── 투표(vote) ────────────────────────────────────────────

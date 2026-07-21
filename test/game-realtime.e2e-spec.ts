@@ -241,22 +241,68 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  it('사다리: 시작→도착 매핑을 전원이 같게 본다', async () => {
+  it('사다리: 시작하기(build) 시 전원이 같은 사다리를 받는다', async () => {
     const { host, guest } = await setupGame('ladder');
     try {
-      const hr = once<{ result: { type: string; matching: unknown[] } }>(
+      const hb = once<{
+        ladder: { columns: number; mapping: number[]; rungs: unknown[] };
+        labels: string[];
+      }>(host, 'ladder:built');
+      const gb = once<{
+        ladder: { columns: number; mapping: number[]; rungs: unknown[] };
+        labels: string[];
+      }>(guest, 'ladder:built');
+
+      const ack = (await host.emitWithAck('ladder:build', {})) as Ack;
+      expect(ack).toEqual({ ok: true });
+
+      const [h, g] = await Promise.all([hb, gb]);
+      expect(h.ladder.columns).toBe(3); // 항목 3개 = 3칸
+      expect(h.labels).toEqual(['짜장', '짬뽕', '볶음밥']);
+      // 서버가 한 번 만든 동일한 사다리(구조·매핑)를 전원이 받는다.
+      expect(h.ladder.mapping).toEqual(g.ladder.mapping);
+      expect(h.ladder.rungs).toEqual(g.ladder.rungs);
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 시작칸 공개(reveal)를 전원이 같은 도착으로 본다', async () => {
+    const { host, guest } = await setupGame('ladder');
+    try {
+      const built = once<{ ladder: { mapping: number[] } }>(
         host,
-        'game:result',
+        'ladder:built',
       );
-      const gr = once<{ result: { type: string; matching: unknown[] } }>(
+      await host.emitWithAck('ladder:build', {});
+      const { ladder } = await built;
+
+      const hr = once<{ topIndex: number; bottomIndex: number; label: string }>(
+        host,
+        'ladder:revealed',
+      );
+      const gr = once<{ topIndex: number; bottomIndex: number; label: string }>(
         guest,
-        'game:result',
+        'ladder:revealed',
       );
-      await host.emitWithAck('game:start', {});
+      await host.emitWithAck('ladder:reveal', { topIndex: 0 });
+
       const [h, g] = await Promise.all([hr, gr]);
-      expect(h.result.type).toBe('ladder');
-      expect(h.result.matching).toHaveLength(3);
-      expect(h.result.matching).toEqual(g.result.matching); // 전원 동일
+      expect(h.topIndex).toBe(0);
+      expect(h.bottomIndex).toBe(ladder.mapping[0]); // 서버 매핑과 일치
+      expect(h).toEqual(g); // 전원 동일
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 참가자는 build·reveal 할 수 없다 (NOT_HOST)', async () => {
+    const { host, guest } = await setupGame('ladder');
+    try {
+      const ack = (await guest.emitWithAck('ladder:build', {})) as Ack;
+      expect(ack).toEqual({ ok: false, code: 'NOT_HOST' });
     } finally {
       host.disconnect();
       guest.disconnect();

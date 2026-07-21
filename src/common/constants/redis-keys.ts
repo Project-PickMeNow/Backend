@@ -17,6 +17,12 @@ export const RedisKeys = {
   /** 투표 진행 상태 (Hash) — socket.id → 선택한 itemId. 한 소켓당 1표(덮어쓰기=투표 변경). */
   gameVotes: (roomId: string) => `game:${roomId}:votes`,
 
+  /** 사다리 구조 (String, JSON) — 서버가 생성한 columns·rungs·mapping */
+  gameLadder: (roomId: string) => `game:${roomId}:ladder`,
+
+  /** 사다리에서 공개된 시작칸 (Set) — 재접속 시 이어보기용 */
+  gameLadderRevealed: (roomId: string) => `game:${roomId}:ladder:revealed`,
+
   /** 전체 접속자 수 (String, 카운터) */
   onlineCount: () => `online:count`,
 

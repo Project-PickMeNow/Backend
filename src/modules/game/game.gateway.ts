@@ -159,6 +159,30 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
+  /** host 사다리 생성('시작하기') — 구조를 만들어 전원에게 broadcast(같은 사다리를 그린다). */
+  @SubscribeMessage('ladder:build')
+  async handleLadderBuild(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const payload = await this.gameService.buildLadder(roomId);
+      this.server.to(roomId).emit('ladder:built', payload);
+    });
+  }
+
+  /** host 시작칸 공개 — 도착 결과를 전원에게 broadcast(참가자도 같은 경로 애니메이션). */
+  @SubscribeMessage('ladder:reveal')
+  async handleLadderReveal(
+    client: AppSocket,
+    payload: { topIndex?: number },
+  ): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const revealed = await this.gameService.revealLadder(
+        roomId,
+        payload?.topIndex ?? -1,
+      );
+      this.server.to(roomId).emit('ladder:revealed', revealed);
+    });
+  }
+
   /**
    * host 전용 액션 공통 래퍼.
    * roomId 유무·host 여부를 검증하고, 서비스가 던지는 GameError(code)를

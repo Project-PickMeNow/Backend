@@ -17,6 +17,13 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       host: this.config.get<string>('REDIS_HOST', 'localhost'),
       port: this.config.get<number>('REDIS_PORT', 6379),
     });
+
+    // ioredis 클라이언트는 연결 오류를 'error' 이벤트로 낸다. 리스너가 없으면
+    // EventEmitter 규칙상 그대로 던져져 프로세스가 죽을 수 있다(특히 종료 중 "Connection is closed").
+    // 여기서 받아 로깅만 하고 삼킨다 — ioredis 가 재연결은 알아서 시도한다.
+    this._client.on('error', (err: Error) => {
+      console.error(`[redis] ${err.message}`);
+    });
   }
 
   async onModuleDestroy() {

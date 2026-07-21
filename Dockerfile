@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+#
+# Pick Me Up 백엔드 프로덕션 이미지 (멀티스테이지).
+# Prisma 는 alpine(musl) 에서 엔진 호환 이슈가 잦아 Debian 기반 node:20-slim 을 쓴다.
+# 시작 시 대기 중인 마이그레이션만 적용(migrate deploy) 후 앱을 실행한다.
+
+# ---- builder: 의존성 설치 + prisma generate + nest build ----
+FROM node:20-slim AS builder
+WORKDIR /app
+
+# Prisma 엔진이 요구하는 openssl
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# lock 파일 기준 재현 가능한 설치(소스보다 먼저 복사해 캐시를 살린다)
+COPY package*.json ./
+RUN npm ci
+
+# 스키마 먼저 복사해 client 생성 — 소스 변경과 캐시를 분리한다
+COPY prisma ./prisma
+RUN npx prisma generate
+
+# 나머지 소스 복사 후 빌드
+COPY . .
+RUN npm run build
+
+# ---- runner: 실행에 필요한 것만 (devDeps 제외로 이미지 슬림) ----
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+# 런타임에도 Prisma 엔진용 openssl 필요
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 프로덕션 의존성만 설치(prisma CLI·@prisma/client 는 dependencies 라 포함, jest/eslint 등은 제외)
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# 스키마 복사 후 이 node_modules 에 맞는 client 를 생성
+COPY prisma ./prisma
+RUN npx prisma generate
+
+# 빌드 산출물
+COPY --from=builder /app/dist ./dist
+
+# 컨테이너 내부 고정 포트(호스트 매핑과 일치시킨다). 앱은 PORT 환경변수를 읽는다.
+ENV PORT=3000
+EXPOSE 3000
+
+# 시작 시: 대기 중인 마이그레이션만 적용(migrate dev 와 달리 스키마를 새로 만들지 않는다) → 앱 실행
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]

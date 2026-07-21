@@ -12,5 +12,18 @@ export interface SingleWinnerResult {
   winner: Item;
 }
 
-/** 앞으로 draw/ballon/ladder/vote 결과 타입이 여기에 추가된다. */
-export type GameResult = SingleWinnerResult;
+/** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */
+export interface VoteTallyEntry {
+  item: Item;
+  count: number;
+}
+
+/** 투표: 집계 + 최다 득표 항목 */
+export interface VoteResult {
+  type: 'vote';
+  tally: VoteTallyEntry[]; // 항목 순서대로, 득표 0 인 항목도 포함
+  winner: Item; // 최다 득표(동점이면 항목 순서상 먼저)
+}
+
+/** 앞으로 draw/balloon/ladder 결과 타입이 여기에 추가된다. */
+export type GameResult = SingleWinnerResult | VoteResult;

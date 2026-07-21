@@ -96,6 +96,43 @@ export class GameGateway {
   }
 
   /**
+   * 참가자 투표 — host 전용이 아니라 입장한 참가자면 누구나 던진다.
+   * 닉네임(room:join 으로 확정)이 있어야 하며, 이를 투표자 키로 써서 한 명당 1표를 보장한다.
+   */
+  @SubscribeMessage('vote:cast')
+  async handleVoteCast(
+    client: AppSocket,
+    payload: { itemId?: string },
+  ): Promise<Ack> {
+    const { roomId, nickname } = client.data;
+    if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
+    // 닉네임 없이(=아직 입장 안 함) 투표할 수 없다.
+    if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+
+    try {
+      const tally = await this.gameService.castVote(
+        roomId,
+        nickname,
+        payload?.itemId,
+      );
+      this.server.to(roomId).emit('vote:updated', { tally });
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof GameError) return this.fail(client, err.code);
+      throw err;
+    }
+  }
+
+  /** host 투표 마감 — 집계 확정 후 최다 득표 결과를 전원에게 broadcast. */
+  @SubscribeMessage('vote:close')
+  async handleVoteClose(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const result = await this.gameService.closeVote(roomId);
+      this.server.to(roomId).emit('game:result', { result });
+    });
+  }
+
+  /**
    * host 전용 액션 공통 래퍼.
    * roomId 유무·host 여부를 검증하고, 서비스가 던지는 GameError(code)를
    * error 이벤트 + ack 로 변환한다. 예상 못 한 오류는 그대로 던져 상위에서 로깅되게 둔다.

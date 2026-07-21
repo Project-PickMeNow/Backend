@@ -6,7 +6,7 @@ import { StatsService } from '../stats/stats.service';
 import { CreateRoomDto, CreateRoomResponse } from './dto/create-room.dto';
 import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
-import { RoomStatePayload } from './room.types';
+import { Item, RoomStatePayload } from './room.types';
 
 /**
  * 방 서비스 — 방 생성/조회.
@@ -218,12 +218,20 @@ export class RoomService {
     );
   }
 
-  /** items 필드(JSON 문자열)를 안전하게 배열로 파싱한다. 깨져 있으면 빈 배열. */
-  private parseItems(raw: string | undefined): string[] {
+  /** items 필드(JSON 문자열)를 안전하게 Item 배열로 파싱한다. 깨져 있으면 빈 배열. */
+  private parseItems(raw: string | undefined): Item[] {
     if (!raw) return [];
     try {
       const parsed: unknown = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as string[]) : [];
+      if (!Array.isArray(parsed)) return [];
+      // {id, label} 형태만 통과시킨다(구버전·깨진 항목 방어).
+      return parsed.filter(
+        (it): it is Item =>
+          typeof it === 'object' &&
+          it !== null &&
+          typeof (it as Item).id === 'string' &&
+          typeof (it as Item).label === 'string',
+      );
     } catch {
       return [];
     }

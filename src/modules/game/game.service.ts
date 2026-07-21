@@ -10,6 +10,7 @@ import { RoomService } from '../room/room.service';
 import {
   GameResult,
   LadderBuiltPayload,
+  LadderResultPayload,
   LadderRevealedPayload,
   VoteResult,
   VoteTallyEntry,
@@ -147,27 +148,36 @@ export class GameService {
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
   }
 
-  // ── 사다리타기 (개수 선택형) ──────────────────────────────
-  // 룰렛/투표와 달리 game:result 로 안 끝난다. 호스트가 사다리를 만들고(build)
-  // 시작점을 하나씩 눌러 공개(reveal)하며, 참가자도 실시간으로 함께 본다.
-  // 하단 라벨은 방 items(호스트가 개수만큼 입력한 결과)를 그대로 쓴다.
+  // ── 사다리타기 (개수 선택형, 네이버 스타일) ─────────────────
+  // 룰렛/투표와 달리 game:result 로 안 끝난다. 호스트가 칸마다 상단(이름)·하단(당첨항목)
+  // 라벨을 적고 '사다리 시작'(build)을 누르면 서버가 가로줄을 무작위 생성해 전원에게 뿌린다.
+  // 이후 호스트가 시작점을 하나씩 눌러 공개(reveal)하거나 '결과 보기'(result)로 한 번에 끝낸다.
 
   /**
-   * 사다리 생성 — items(=하단 라벨) 수만큼 칸을 만들고 "구조 + 라벨 스냅샷"을 함께 저장한다.
+   * 사다리 생성 — 호스트가 보낸 상·하단 라벨 수만큼 칸을 만들고 "구조 + 라벨 스냅샷"을 저장한다.
    *
-   * 라벨 스냅샷을 같이 저장하는 이유: build 이후 host 가 항목을 바꿔도 이미 만든 사다리는
-   * 그때의 라벨로 고정돼야 칸 수와 라벨이 어긋나지 않는다. 같은 라벨로 다시 build 하면
-   * 사다리를 그대로 재사용(고정)하고, 라벨이 달라졌으면 새 사다리로 재생성한다(옛 공개는 무효).
+   * 라벨을 payload 로 받는 이유: 사다리 화면은 방 items 흐름과 분리돼, 칸마다 상단(이름)·
+   * 하단(당첨항목) 두 줄을 직접 편집한다. 스냅샷으로 고정 저장해 이후 재접속·늦은 입장도 복원한다.
+   * 같은 라벨로 다시 build 하면 사다리를 그대로 재사용하고, 라벨이 바뀌었으면 새로 만든다(옛 공개 무효).
    */
-  async buildLadder(roomId: string): Promise<LadderBuiltPayload> {
+  async buildLadder(
+    roomId: string,
+    topLabels: string[],
+    bottomLabels: string[],
+  ): Promise<LadderBuiltPayload> {
     const room = await this.loadRoomOrThrow(roomId);
     if (room.gameType !== 'ladder') {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
 
-    const labels = this.parseItems(room.items).map((it) => it.label);
-    if (labels.length < LADDER.MIN || labels.length > LADDER.MAX) {
-      // 사다리는 2~10칸. 벗어나면 항목 수 문제로 본다.
+    const tops = this.normalizeLabels(topLabels);
+    const bottoms = this.normalizeLabels(bottomLabels);
+    // 상·하단 칸 수가 같아야 하고(각 칸이 위아래 한 쌍), 사다리는 2~10칸.
+    if (
+      tops.length !== bottoms.length ||
+      tops.length < LADDER.MIN ||
+      tops.length > LADDER.MAX
+    ) {
       throw new GameError(ERROR_CODES.NEED_MORE_ITEMS);
     }
 
@@ -178,12 +188,19 @@ export class GameService {
       ? (JSON.parse(existingRaw) as LadderBuiltPayload)
       : null;
 
-    // 이전 사다리의 라벨과 지금 라벨이 같으면 그대로 재사용(시작하기 여러 번 눌러도 고정).
-    const reuse = existing !== null && this.sameLabels(existing.labels, labels);
+    // 이전 사다리의 라벨과 지금 라벨이 상·하단 모두 같으면 그대로 재사용(시작하기 여러 번 눌러도 고정).
+    const reuse =
+      existing !== null &&
+      this.sameLabels(existing.topLabels, tops) &&
+      this.sameLabels(existing.bottomLabels, bottoms);
 
     const built: LadderBuiltPayload = reuse
       ? existing
-      : { ladder: generateLadder(labels.length), labels };
+      : {
+          ladder: generateLadder(tops.length),
+          topLabels: tops,
+          bottomLabels: bottoms,
+        };
 
     if (!reuse) {
       await this.redis.client.set(
@@ -201,17 +218,13 @@ export class GameService {
   }
 
   /**
-   * 시작칸 하나 공개 — 저장된 스냅샷(구조+라벨)으로 도착칸과 라벨을 돌려주고 공개 목록에 기록한다.
-   * live items 가 아니라 build 당시 라벨을 쓰므로, 항목이 바뀌어도 사다리와 항상 일관된다.
+   * 시작칸 하나 공개 — 저장된 스냅샷(구조+라벨)으로 도착칸과 상·하단 라벨을 돌려주고 공개 목록에 기록한다.
    */
   async revealLadder(
     roomId: string,
     topIndex: number,
   ): Promise<LadderRevealedPayload> {
-    const raw = await this.redis.client.get(RedisKeys.gameLadder(roomId));
-    if (!raw) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 안 만듦
-
-    const built = JSON.parse(raw) as LadderBuiltPayload;
+    const built = await this.loadLadderOrThrow(roomId);
     if (
       !Number.isInteger(topIndex) ||
       topIndex < 0 ||
@@ -220,15 +233,62 @@ export class GameService {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
 
-    const bottomIndex = built.ladder.mapping[topIndex];
-
     await this.redis.client.sadd(
       RedisKeys.gameLadderRevealed(roomId),
       String(topIndex),
     );
     await this.rooms.touchRoom(roomId);
 
-    return { topIndex, bottomIndex, label: built.labels[bottomIndex] ?? '' };
+    return this.pairAt(built, topIndex);
+  }
+
+  /**
+   * '결과 보기' — 전체 시작칸을 한 번에 공개하고 상단→하단 매칭을 통째로 돌려준다.
+   * 모든 시작칸을 공개 목록에 넣고 방을 finished 로 넘긴다(한 판 종료).
+   */
+  async resultLadder(roomId: string): Promise<LadderResultPayload> {
+    const built = await this.loadLadderOrThrow(roomId);
+    const { columns } = built.ladder;
+
+    const allTops = Array.from({ length: columns }, (_, i) => String(i));
+    await this.redis.client.sadd(
+      RedisKeys.gameLadderRevealed(roomId),
+      ...allTops,
+    );
+    await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'finished');
+    await this.rooms.touchRoom(roomId);
+
+    const pairs = Array.from({ length: columns }, (_, i) =>
+      this.pairAt(built, i),
+    );
+    return { pairs };
+  }
+
+  /** 저장된 사다리 스냅샷을 불러온다. 아직 build 전이면 에러. */
+  private async loadLadderOrThrow(roomId: string): Promise<LadderBuiltPayload> {
+    const raw = await this.redis.client.get(RedisKeys.gameLadder(roomId));
+    if (!raw) throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    return JSON.parse(raw) as LadderBuiltPayload;
+  }
+
+  /** 시작칸 topIndex 의 도착칸·상하단 라벨을 묶어 준다. */
+  private pairAt(
+    built: LadderBuiltPayload,
+    topIndex: number,
+  ): LadderRevealedPayload {
+    const bottomIndex = built.ladder.mapping[topIndex];
+    return {
+      topIndex,
+      bottomIndex,
+      topLabel: built.topLabels[topIndex] ?? '',
+      bottomLabel: built.bottomLabels[bottomIndex] ?? '',
+    };
+  }
+
+  /** 라벨 배열을 문자열로 정규화(각 칸 trim, 비문자·누락은 빈 문자열). */
+  private normalizeLabels(labels: unknown): string[] {
+    if (!Array.isArray(labels)) return [];
+    return labels.map((l) => (typeof l === 'string' ? l.trim() : ''));
   }
 
   /** 라벨 배열이 순서까지 같은지(사다리 재사용 판별용). */

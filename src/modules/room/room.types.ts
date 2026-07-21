@@ -31,7 +31,8 @@ export interface RoomStatePayload {
   // 늦게 들어오거나 재접속한 참가자도 room:state 하나로 현재 사다리를 그대로 복원한다.
   // 사다리 아니면 null·빈 배열.
   ladder: LadderStructure | null;
-  ladderLabels: string[]; // 하단 라벨 스냅샷(칸 수와 항상 일치)
+  ladderTopLabels: string[]; // 상단 라벨 스냅샷(이름, 칸 수와 항상 일치)
+  ladderBottomLabels: string[]; // 하단 라벨 스냅샷(당첨항목, 칸 수와 항상 일치)
   ladderRevealed: number[];
 }
 

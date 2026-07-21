@@ -38,17 +38,27 @@ export interface LadderStructure {
   mapping: number[]; // mapping[i] = 시작칸 i 의 도착칸 (항상 순열)
 }
 
-/** ladder:built broadcast — 사다리 구조 + 하단 라벨(호스트가 입력한 결과들). */
+/**
+ * ladder:built broadcast — 사다리 구조 + 상·하단 라벨(호스트가 칸마다 입력).
+ * 상단 = 이름, 하단 = 당첨항목. 둘 다 길이 = columns.
+ */
 export interface LadderBuiltPayload {
   ladder: LadderStructure;
-  labels: string[]; // 하단 칸별 라벨(items 라벨). 길이 = columns
+  topLabels: string[]; // 상단 칸별 라벨(이름)
+  bottomLabels: string[]; // 하단 칸별 라벨(당첨항목)
 }
 
-/** ladder:revealed broadcast — 방금 공개된 시작칸과 그 도착 결과. */
+/** ladder:revealed broadcast — 방금 공개된 시작칸과 그 도착 결과(상·하단 라벨). */
 export interface LadderRevealedPayload {
   topIndex: number; // 공개한 시작칸
   bottomIndex: number; // 도착칸 (= mapping[topIndex])
-  label: string; // 도착칸 라벨
+  topLabel: string; // 시작칸 라벨(이름)
+  bottomLabel: string; // 도착칸 라벨(당첨항목)
+}
+
+/** ladder:result broadcast — '결과 보기'/전부 공개 시 상단→하단 전체 매칭. 모달을 전원 동시에 연다. */
+export interface LadderResultPayload {
+  pairs: LadderRevealedPayload[]; // 시작칸 순서대로 topIndex 0..columns-1
 }
 
 /** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */

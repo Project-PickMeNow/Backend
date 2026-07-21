@@ -3,12 +3,14 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { configureApp } from './../src/configure-app';
 
 /**
  * REST 관통 e2e — 실제 Redis·PostgreSQL 이 떠 있어야 한다.
  * (로컬: docker compose up -d / CI: ci.yml 의 서비스 컨테이너 + prisma migrate deploy)
  *
- * main.ts 와 동일하게 'api' 전역 prefix 를 걸어야 실제 배포와 같은 경로를 검증한다.
+ * configureApp 으로 main.ts 와 동일한 전역 설정(prefix·검증·에러필터)을 적용해
+ * 실제 배포와 같은 동작을 검증한다.
  */
 
 /** 성공 응답 공통 형태 — supertest 의 res.body 는 any 라 여기서 타입을 붙인다. */
@@ -17,9 +19,10 @@ interface ApiEnvelope<T> {
   data: T;
 }
 
-interface ErrorBody {
-  code: string;
-  message: string;
+/** 에러 응답 공통 형태 — { success:false, error:{ code, message } } */
+interface ErrorEnvelope {
+  success: boolean;
+  error: { code: string; message: string };
 }
 
 interface RoomSummary {
@@ -39,7 +42,7 @@ describe('REST API (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
+    configureApp(app);
     await app.init();
   });
 
@@ -99,11 +102,32 @@ describe('REST API (e2e)', () => {
     expect(JSON.stringify(fetched.body)).not.toContain(hostToken);
   });
 
-  it('GET /api/rooms/:roomId — 없는 방은 404 ROOM_NOT_FOUND', async () => {
+  it('GET /api/rooms/:roomId — 없는 방은 404, 에러 봉투 { success:false, error:{code} }', async () => {
     const res = await request(app.getHttpServer())
       .get('/api/rooms/ZZZZZZ')
       .expect(404);
 
-    expect((res.body as ErrorBody).code).toBe('ROOM_NOT_FOUND');
+    const body = res.body as ErrorEnvelope;
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('ROOM_NOT_FOUND');
+    expect(typeof body.error.message).toBe('string');
+  });
+
+  it('POST /api/rooms — 잘못된 gameType 은 400 VALIDATION_ERROR', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/rooms')
+      .send({ gameType: 'bogus' })
+      .expect(400);
+
+    expect((res.body as ErrorEnvelope).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('POST /api/rooms — DTO 에 없는 필드는 거부(whitelist) → 400', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/rooms')
+      .send({ title: '정상', hacker: 'inject' })
+      .expect(400);
+
+    expect((res.body as ErrorEnvelope).error.code).toBe('VALIDATION_ERROR');
   });
 });

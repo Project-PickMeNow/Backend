@@ -22,8 +22,11 @@ describe('RoomService', () => {
     exists: jest.Mock;
     hgetall: jest.Mock;
     scard: jest.Mock;
+    sismember: jest.Mock;
+    sadd: jest.Mock;
+    smembers: jest.Mock;
   };
-  let stats: { incrementRooms: jest.Mock };
+  let stats: { incrementRooms: jest.Mock; incrementParticipants: jest.Mock };
   let service: RoomService;
 
   beforeEach(() => {
@@ -33,14 +36,21 @@ describe('RoomService', () => {
       exists: jest.fn().mockResolvedValue(0), // 기본: 충돌 없음
       hgetall: jest.fn(),
       scard: jest.fn().mockResolvedValue(0),
+      sismember: jest.fn().mockResolvedValue(0), // 기본: 새 참가자
+      sadd: jest.fn().mockResolvedValue(1), // 기본: 추가 성공
+      smembers: jest.fn().mockResolvedValue([]),
     };
-    stats = { incrementRooms: jest.fn().mockResolvedValue(undefined) };
+    stats = {
+      incrementRooms: jest.fn().mockResolvedValue(undefined),
+      incrementParticipants: jest.fn().mockResolvedValue(undefined),
+    };
 
     const config = {
       get: (key: string, fallback: string) =>
         ({
           ROOM_TTL_SECONDS: '259200',
           FRONTEND_BASE_URL: 'https://example.test',
+          ROOM_MAX_PARTICIPANTS: '3', // 테스트 편의상 낮게
         })[key] ?? fallback,
     };
 
@@ -156,6 +166,59 @@ describe('RoomService', () => {
       const summary = await service.getRoomSummary('ABC123');
 
       expect(summary.gameType).toBeNull();
+    });
+  });
+
+  describe('addParticipant', () => {
+    it('새 닉네임을 추가하면 status=added + 통계·TTL 갱신', async () => {
+      clientMock.sismember.mockResolvedValue(0); // 아직 없음
+      clientMock.scard.mockResolvedValue(1); // 정원(3) 미만
+      clientMock.sadd.mockResolvedValue(1); // 추가 성공
+      clientMock.smembers.mockResolvedValue(['기존', '새사람']);
+
+      const res = await service.addParticipant('ABC123', '새사람');
+
+      expect(res.status).toBe('added');
+      expect(res.participantCount).toBe(2);
+      expect(stats.incrementParticipants).toHaveBeenCalledTimes(1);
+      // touchRoom 이 multi().expire(...).exec() 로 TTL 을 리셋한다.
+      expect(multiMock.expire).toHaveBeenCalled();
+      expect(multiMock.exec).toHaveBeenCalled();
+    });
+
+    it('닉네임이 중복이면 status=taken (SADD 가 0)', async () => {
+      clientMock.sismember.mockResolvedValue(0);
+      clientMock.scard.mockResolvedValue(1);
+      clientMock.sadd.mockResolvedValue(0); // 이미 존재
+      clientMock.smembers.mockResolvedValue(['중복']);
+
+      const res = await service.addParticipant('ABC123', '중복');
+
+      expect(res.status).toBe('taken');
+      expect(stats.incrementParticipants).not.toHaveBeenCalled();
+    });
+
+    it('정원이 차면 신규 입장은 status=full (SADD 를 시도하지 않는다)', async () => {
+      clientMock.sismember.mockResolvedValue(0); // 새 참가자
+      clientMock.scard.mockResolvedValue(3); // 정원(3) 도달
+
+      const res = await service.addParticipant('ABC123', '초과');
+
+      expect(res.status).toBe('full');
+      expect(clientMock.sadd).not.toHaveBeenCalled();
+      expect(stats.incrementParticipants).not.toHaveBeenCalled();
+    });
+
+    it('이미 들어와 있던 닉네임의 재요청은 정원과 무관하게 통과', async () => {
+      clientMock.sismember.mockResolvedValue(1); // 이미 있음
+      clientMock.scard.mockResolvedValue(3); // 정원 꽉 찼어도
+      clientMock.sadd.mockResolvedValue(0); // 이미 존재라 0
+      clientMock.smembers.mockResolvedValue(['나', '남', '또']);
+
+      const res = await service.addParticipant('ABC123', '나');
+
+      // 정원 체크를 건너뛰므로 full 이 아니다(SADD 결과에 따라 taken).
+      expect(res.status).not.toBe('full');
     });
   });
 });

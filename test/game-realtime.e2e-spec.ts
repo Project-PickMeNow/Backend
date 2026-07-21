@@ -6,6 +6,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { io, Socket } from 'socket.io-client';
 import { AppModule } from './../src/app.module';
+import { configureApp } from './../src/configure-app';
 
 /**
  * 게임 관통 e2e — 계획서 WS4: 호스트가 "돌리기" 하면 두 기기가 동시에 같은 결과를 본다.
@@ -74,7 +75,7 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
+    configureApp(app);
     await app.listen(0);
     const server = app.getHttpServer() as Server;
     const { port } = server.address() as AddressInfo;

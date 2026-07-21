@@ -6,6 +6,7 @@ import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
+import { RoomService } from '../room/room.service';
 import { GameResult, VoteResult, VoteTallyEntry } from './game.types';
 import { ENGINES } from './engines';
 import { VoteEngine } from './engines/vote';
@@ -38,6 +39,7 @@ export class GameService {
   constructor(
     private readonly redis: RedisService,
     private readonly stats: StatsService,
+    private readonly rooms: RoomService,
   ) {}
 
   /** 항목 추가 → 갱신된 전체 목록 반환 */
@@ -166,10 +168,8 @@ export class GameService {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
 
-    const key = RedisKeys.gameVotes(roomId);
-    await this.redis.client.hset(key, voter, itemId);
-    const ttl = await this.redis.client.ttl(RedisKeys.room(roomId));
-    if (ttl > 0) await this.redis.client.expire(key, ttl);
+    await this.redis.client.hset(RedisKeys.gameVotes(roomId), voter, itemId);
+    await this.rooms.touchRoom(roomId); // 활동 발생 → 방·투표 키 TTL 리셋
 
     return this.voteEngine.tally(items, await this.loadChoices(roomId));
   }
@@ -240,21 +240,30 @@ export class GameService {
     return room;
   }
 
-  /** items 를 저장한다. hset 은 기존 키의 TTL 을 건드리지 않아 방 수명이 유지된다. */
+  /** items 를 저장한다(항목 add/remove/reorder 공통). 활동이므로 방 TTL 도 리셋한다. */
   private async saveItems(roomId: string, items: Item[]): Promise<void> {
     await this.redis.client.hset(
       RedisKeys.room(roomId),
       'items',
       JSON.stringify(items),
     );
+    await this.rooms.touchRoom(roomId);
   }
 
-  /** 결과를 저장하고, 방이 사라질 때 함께 없어지도록 방과 같은 잔여 TTL 을 준다. */
+  /**
+   * 결과를 저장한다(게임 실행·투표 마감 공통). 활동이므로 방 TTL 을 리셋하고,
+   * 결과 키도 방과 같은 수명을 줘 방이 사라질 때 함께 없어지게 한다.
+   */
   private async saveResult(roomId: string, result: GameResult): Promise<void> {
-    const key = RedisKeys.gameResult(roomId);
-    await this.redis.client.set(key, JSON.stringify(result));
-    const ttl = await this.redis.client.ttl(RedisKeys.room(roomId));
-    if (ttl > 0) await this.redis.client.expire(key, ttl);
+    await this.redis.client.set(
+      RedisKeys.gameResult(roomId),
+      JSON.stringify(result),
+    );
+    await this.rooms.touchRoom(roomId);
+    await this.redis.client.expire(
+      RedisKeys.gameResult(roomId),
+      this.rooms.ttl,
+    );
   }
 
   private parseItems(raw: string | undefined): Item[] {

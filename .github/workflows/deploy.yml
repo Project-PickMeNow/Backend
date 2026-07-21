@@ -69,7 +69,7 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: EC2에 compose 파일 복사
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}

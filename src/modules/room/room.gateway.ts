@@ -95,10 +95,28 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
     if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
 
-    const { added, participants, participantCount } =
-      await this.roomService.addParticipant(roomId, nickname);
+    // 같은 닉네임으로 다시 눌러도 성공으로 취급(멱등).
+    const previous = client.data.nickname;
+    if (previous === nickname) return { ok: true };
 
-    if (!added) return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+    // 새 닉네임을 먼저 확보한다. 실패(다른 소켓이 선점)하면 옛 슬롯은 건드리지 않아야
+    // 사용자가 아무 데도 못 남는 상황을 피할 수 있다 → 순서상 add 를 remove 보다 앞에 둔다.
+    const add = await this.roomService.addParticipant(roomId, nickname);
+    if (!add.added) return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+
+    // 이 소켓이 이미 다른 닉네임으로 입장해 있었다면 옛 슬롯을 비워 유령 참가자를 막는다.
+    // 최종(옛 닉네임 제거 후) 목록으로 broadcast 해야 카운트가 정확하다.
+    let { participants, participantCount } = add;
+    if (previous && previous !== nickname) {
+      const after = await this.roomService.removeParticipant(roomId, previous);
+      participants = after.participants;
+      participantCount = after.participantCount;
+      this.server.to(roomId).emit('participant:left', {
+        nickname: previous,
+        participants,
+        participantCount,
+      });
+    }
 
     client.data.nickname = nickname;
     this.server

@@ -153,6 +153,34 @@ describe('RoomGateway 실시간 입장 (e2e)', () => {
     }
   });
 
+  it('한 소켓이 닉네임을 바꿔 재입장해도 유령 참가자가 남지 않는다', async () => {
+    const { roomId } = await createRoom();
+    const a = connect(roomId);
+    const b = connect(roomId);
+    try {
+      await Promise.all([once(a, 'room:state'), once(b, 'room:state')]);
+
+      await a.emitWithAck('room:join', { nickname: '옛이름' });
+
+      // A 가 다른 닉네임으로 다시 입장 → B 는 옛이름의 left 를 보고, 최종 count 는 1 이어야 한다.
+      const bSeesLeft = once<{ nickname: string; participantCount: number }>(
+        b,
+        'participant:left',
+      );
+      const ack = (await a.emitWithAck('room:join', {
+        nickname: '새이름',
+      })) as Ack;
+      expect(ack).toEqual({ ok: true });
+
+      const left = await bSeesLeft;
+      expect(left.nickname).toBe('옛이름');
+      expect(left.participantCount).toBe(1); // 새이름만 남아야 함(유령 없음)
+    } finally {
+      a.disconnect();
+      b.disconnect();
+    }
+  });
+
   it('없는 방으로 접속하면 error 후 연결이 끊긴다', async () => {
     const bad = connect('ZZZZZZ');
     try {

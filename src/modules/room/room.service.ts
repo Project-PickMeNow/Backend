@@ -215,6 +215,7 @@ export class RoomService {
       RedisKeys.roomPlayers(roomId),
       RedisKeys.onlineRoom(roomId),
       RedisKeys.gameResult(roomId),
+      RedisKeys.gameVotes(roomId),
     );
   }
 

@@ -6,8 +6,9 @@ import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
-import { GameResult } from './game.types';
+import { GameResult, VoteResult, VoteTallyEntry } from './game.types';
 import { ENGINES } from './engines';
+import { VoteEngine } from './engines/vote';
 
 /**
  * 도메인 규칙 위반을 나타내는 에러. code 는 ERROR_CODES 의 값이며
@@ -31,6 +32,8 @@ export class GameError extends Error {
 export class GameService {
   /** 게임을 돌리려면 항목이 최소 몇 개 있어야 하는지 */
   private static readonly MIN_ITEMS = 2;
+
+  private readonly voteEngine = new VoteEngine();
 
   constructor(
     private readonly redis: RedisService,
@@ -120,11 +123,107 @@ export class GameService {
     return { gameType, result, items };
   }
 
-  /** 한 판 더 — 결과를 지우고 대기 상태로 되돌린다. */
+  /** 한 판 더 — 결과·투표를 지우고 대기 상태로 되돌린다. */
   async resetGame(roomId: string): Promise<void> {
     await this.loadRoomOrThrow(roomId);
-    await this.redis.client.del(RedisKeys.gameResult(roomId));
+    await this.redis.client.del(
+      RedisKeys.gameResult(roomId),
+      RedisKeys.gameVotes(roomId),
+    );
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
+  }
+
+  // ── 투표(vote) ────────────────────────────────────────────
+  // 룰렛처럼 즉시 끝나지 않고 "참가자가 하나씩 던지고 host 가 마감"하는 흐름이라
+  // 별도 메서드로 둔다. 표는 game:{id}:votes(socket.id→itemId) 에 쌓인다.
+  //
+  // 투표자 키는 닉네임이 아니라 socket.id 다: 닉네임을 키로 쓰면 닉네임만 바꿔
+  // 재입장해 옛 표를 남기는 식으로 중복 투표가 가능하다. socket.id 는 연결당 고정이라
+  // 한 소켓은 1표만 갖고, 끊기면 removeVote 로 정리된다.
+
+  /**
+   * 참가자 1표 반영 → 갱신된 집계 반환.
+   * voter(=socket.id)를 키로 HSET 하므로 한 소켓당 1표이고, 다시 던지면 표가 이동한다.
+   */
+  async castVote(
+    roomId: string,
+    voter: string,
+    itemId: string | undefined,
+  ): Promise<VoteTallyEntry[]> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'vote') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+    if (room.status === 'finished') {
+      // 이미 마감된 투표엔 던질 수 없다.
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const items = this.parseItems(room.items);
+    if (!itemId || !items.some((it) => it.id === itemId)) {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const key = RedisKeys.gameVotes(roomId);
+    await this.redis.client.hset(key, voter, itemId);
+    const ttl = await this.redis.client.ttl(RedisKeys.room(roomId));
+    if (ttl > 0) await this.redis.client.expire(key, ttl);
+
+    return this.voteEngine.tally(items, await this.loadChoices(roomId));
+  }
+
+  /**
+   * host 투표 마감 → 집계 확정 + 최다 득표 결과 저장, stats +1.
+   * 결과는 서버가 한 번만 계산해 game:result 로 전원에게 broadcast 된다(모두 같은 결과).
+   */
+  async closeVote(roomId: string): Promise<VoteResult> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'vote') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const items = this.parseItems(room.items);
+    if (items.length < GameService.MIN_ITEMS) {
+      throw new GameError(ERROR_CODES.NEED_MORE_ITEMS);
+    }
+
+    const result = this.voteEngine.close(items, await this.loadChoices(roomId));
+
+    await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'finished');
+    await this.saveResult(roomId, result);
+    // host 가 "마감" 을 두 번 눌러도 한 판은 한 판 — finished 로 처음 넘어갈 때만 집계한다.
+    if (room.status !== 'finished') {
+      await this.stats.incrementPlays();
+    }
+
+    return result;
+  }
+
+  /**
+   * 소켓이 끊길 때 그 소켓의 표를 지운다 → 표가 실제로 지워졌고 투표 진행 중이면
+   * 갱신된 집계를 반환(게이트웨이가 broadcast), 아니면 null.
+   */
+  async removeVote(
+    roomId: string,
+    voter: string,
+  ): Promise<VoteTallyEntry[] | null> {
+    const removed = await this.redis.client.hdel(
+      RedisKeys.gameVotes(roomId),
+      voter,
+    );
+    if (removed === 0) return null; // 이 소켓은 투표한 적 없음
+
+    const room = await this.redis.client.hgetall(RedisKeys.room(roomId));
+    // 방이 사라졌거나 이미 마감됐으면 굳이 갱신을 쏘지 않는다.
+    if (room.gameType !== 'vote' || room.status === 'finished') return null;
+
+    const items = this.parseItems(room.items);
+    return this.voteEngine.tally(items, await this.loadChoices(roomId));
+  }
+
+  /** votes 해시의 값(각 투표자가 고른 itemId)만 뽑아온다. */
+  private async loadChoices(roomId: string): Promise<string[]> {
+    return this.redis.client.hvals(RedisKeys.gameVotes(roomId));
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { SlotEngine } from './slot';
+import { OrderEngine } from './order';
 import { MultiWinnerEngine } from './multi-winner';
 import { generateLadder } from './ladder';
 import { shuffle, pickN } from './random';
@@ -31,13 +31,14 @@ describe('random 헬퍼', () => {
   });
 });
 
-describe('SlotEngine', () => {
-  const engine = new SlotEngine();
-  it('항상 항목 중 하나를 당첨으로 뽑는다', () => {
+describe('OrderEngine', () => {
+  const engine = new OrderEngine();
+  it('항목 전체를 무작위 순서(순열)로 돌려준다', () => {
     for (let i = 0; i < 30; i++) {
       const r = engine.run(items);
-      expect(r.type).toBe('slot');
-      expect(items).toContainEqual(r.winner);
+      expect(r.type).toBe('order');
+      expect(r.order).toHaveLength(items.length); // 전체 포함
+      expect(new Set(r.order)).toEqual(new Set(items)); // 같은 원소 집합(누락·중복 없음)
     }
   });
   it('빈 배열이면 예외', () => {

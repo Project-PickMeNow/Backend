@@ -6,5 +6,5 @@ export const LADDER = {
   /** 최소 칸 수(사다리가 성립하려면 최소 2) */
   MIN: 2,
   /** 최대 칸 수 */
-  MAX: 10,
+  MAX: 12,
 } as const;

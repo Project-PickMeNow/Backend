@@ -4,7 +4,11 @@
  */
 
 // 사다리 구조·제비뽑기 상태 타입은 game 도메인이 소유. 순환 런타임 의존을 피해 타입만 가져온다.
-import type { LadderStructure, DrawState } from '../game/game.types';
+import type {
+  LadderStructure,
+  DrawState,
+  BalloonState,
+} from '../game/game.types';
 
 /**
  * 게임에 쓰이는 항목 하나.
@@ -37,6 +41,8 @@ export interface RoomStatePayload {
   // 제비뽑기가 진행 중(섞기 완료)이면 그 상태(개수·꽝수·이미 뽑힌 제비들). 아니면 null.
   // 재접속·늦은 입장도 room:state 하나로 현재 제비판을 복원한다.
   draw: DrawState | null;
+  // 풍선 게임이 진행 중이면 그 상태(총 개수·터진 풍선·턴 순서·현재 턴·걸린 사람). 아니면 null.
+  balloon: BalloonState | null;
 }
 
 /** 입·퇴장 시 방 전체에 broadcast (participant:joined / participant:left) */

@@ -1,0 +1,50 @@
+# 프로덕션 스택 (EC2). deploy.yml 이 이 파일을 ~/app 로 복사하고
+#   docker compose -f docker-compose.prod.yml pull && up -d
+# 를 실행한다. 앱 이미지는 CI 가 빌드·푸시한 뒤 .env 의 DOCKER_IMAGE 로 지정한다.
+#
+# 필요한 환경변수는 같은 디렉터리의 .env 에 둔다(.env.prod.example 참고).
+# TLS/wss 는 이후 nginx 를 앞단에 붙여 처리한다(지금은 app 포트를 직접 노출).
+services:
+  app:
+    image: ${DOCKER_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 컨테이너 내부는 항상 3000 으로 고정(아래 포트 매핑과 일치). .env 의 PORT 보다 우선한다.
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      # 호스트 노출 포트는 APP_PORT(기본 3000). nginx 를 붙이면 이 매핑을 내부로 돌린다.
+      - '${APP_PORT:-3000}:3000'
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # POSTGRES_USER/PASSWORD/DB 를 .env 에서 읽는다(앱의 DATABASE_URL 과 반드시 일치).
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-pickmeup}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

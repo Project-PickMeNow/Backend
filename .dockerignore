@@ -1,0 +1,29 @@
+# 이미지 안에서 새로 설치·빌드하므로 로컬 산출물은 넣지 않는다(용량·오염 방지)
+node_modules
+dist
+coverage
+
+# 비밀·로컬 설정은 절대 이미지에 굽지 않는다
+.env
+.env.*
+!.env.example
+
+# 개발 전용
+.git
+.github
+.omc
+test
+**/*.spec.ts
+.vscode
+.idea
+
+# 문서·메타
+*.md
+!README.md
+.prettierrc
+eslint.config.mjs
+
+# 컨테이너 오케스트레이션(이미지 안에 필요 없음)
+Dockerfile
+.dockerignore
+docker-compose*.yml

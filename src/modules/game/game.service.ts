@@ -95,6 +95,7 @@ export class GameService {
    */
   async startGame(
     roomId: string,
+    options?: Record<string, unknown>,
   ): Promise<{ gameType: GameType; result: GameResult; items: Item[] }> {
     const room = await this.loadRoomOrThrow(roomId);
 
@@ -105,7 +106,7 @@ export class GameService {
     }
     const engine = ENGINES[gameType];
     if (!engine) {
-      // 종류는 유효하지만 아직 엔진 미구현(Phase 2 이후).
+      // 종류는 유효하지만 game:start 로 즉시 실행하는 게임이 아니다(예: vote 는 vote:close).
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
 
@@ -114,7 +115,8 @@ export class GameService {
       throw new GameError(ERROR_CODES.NEED_MORE_ITEMS);
     }
 
-    const result = engine.run(items);
+    // options 는 게임별로 쓰인다(예: draw/balloon 의 count = 뽑을 인원 수).
+    const result = engine.run(items, options);
 
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'finished');
     await this.saveResult(roomId, result);

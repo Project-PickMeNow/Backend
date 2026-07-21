@@ -186,4 +186,79 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       guest.disconnect();
     }
   });
+
+  /** 항목 3개 추가 + gameType 선택까지 끝낸 뒤 host·guest 를 돌려주는 헬퍼 */
+  const setupGame = async (gameType: string) => {
+    const { host, guest } = await setup();
+    await host.emitWithAck('item:add', { label: '짜장' });
+    await host.emitWithAck('item:add', { label: '짬뽕' });
+    await host.emitWithAck('item:add', { label: '볶음밥' });
+    await host.emitWithAck('game:select', { gameType });
+    return { host, guest };
+  };
+
+  it('슬롯: host·참가자가 동시에 같은 당첨을 본다', async () => {
+    const { host, guest } = await setupGame('slot');
+    try {
+      const hr = once<{ result: { type: string; winner: Item } }>(
+        host,
+        'game:result',
+      );
+      const gr = once<{ result: { type: string; winner: Item } }>(
+        guest,
+        'game:result',
+      );
+      await host.emitWithAck('game:start', {});
+      const [h, g] = await Promise.all([hr, gr]);
+      expect(h.result.type).toBe('slot');
+      expect(h.result.winner).toEqual(g.result.winner);
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('제비뽑기: count 만큼 N명을 뽑고 전원이 같은 결과를 본다', async () => {
+    const { host, guest } = await setupGame('draw');
+    try {
+      const hr = once<{ result: { type: string; winners: Item[] } }>(
+        host,
+        'game:result',
+      );
+      const gr = once<{ result: { type: string; winners: Item[] } }>(
+        guest,
+        'game:result',
+      );
+      await host.emitWithAck('game:start', { options: { count: 2 } });
+      const [h, g] = await Promise.all([hr, gr]);
+      expect(h.result.type).toBe('draw');
+      expect(h.result.winners).toHaveLength(2);
+      expect(h.result.winners).toEqual(g.result.winners); // 전원 동일
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
+
+  it('사다리: 시작→도착 매핑을 전원이 같게 본다', async () => {
+    const { host, guest } = await setupGame('ladder');
+    try {
+      const hr = once<{ result: { type: string; matching: unknown[] } }>(
+        host,
+        'game:result',
+      );
+      const gr = once<{ result: { type: string; matching: unknown[] } }>(
+        guest,
+        'game:result',
+      );
+      await host.emitWithAck('game:start', {});
+      const [h, g] = await Promise.all([hr, gr]);
+      expect(h.result.type).toBe('ladder');
+      expect(h.result.matching).toHaveLength(3);
+      expect(h.result.matching).toEqual(g.result.matching); // 전원 동일
+    } finally {
+      host.disconnect();
+      guest.disconnect();
+    }
+  });
 });

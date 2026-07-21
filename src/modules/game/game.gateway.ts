@@ -97,9 +97,15 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   @SubscribeMessage('game:start')
-  async handleGameStart(client: AppSocket): Promise<Ack> {
+  async handleGameStart(
+    client: AppSocket,
+    payload?: { options?: Record<string, unknown> },
+  ): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
-      const { gameType, result } = await this.gameService.startGame(roomId);
+      const { gameType, result } = await this.gameService.startGame(
+        roomId,
+        payload?.options,
+      );
       // 계산이 끝났음을 먼저 알리고(애니메이션 시작 신호), 이어서 결과를 전원 동시 전달.
       this.server.to(roomId).emit('game:started', { gameType });
       this.server.to(roomId).emit('game:result', { result });

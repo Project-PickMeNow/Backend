@@ -6,6 +6,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { io, Socket } from 'socket.io-client';
 import { AppModule } from './../src/app.module';
+import { configureApp } from './../src/configure-app';
 
 /** room:join / room:close 등 ack 응답의 공통 형태 */
 type Ack = { ok: true } | { ok: false; code: string };
@@ -59,7 +60,7 @@ describe('RoomGateway 실시간 입장 (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
+    configureApp(app);
     // socket.io-client 가 붙으려면 실제 포트를 열어야 한다(app.init 만으로는 리스너가 없다).
     await app.listen(0);
     const server = app.getHttpServer() as Server;

@@ -1,13 +1,14 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { configureApp } from './configure-app';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
 
-  // 모든 REST 경로에 /api prefix (예: /api/rooms, /api/stats, /api/health)
-  app.setGlobalPrefix('api');
+  // prefix·검증·에러필터 (e2e 와 공유하는 전역 설정)
+  configureApp(app);
 
   // 프론트(Vercel/로컬)에서 접근 허용
   app.enableCors({

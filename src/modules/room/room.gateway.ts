@@ -102,7 +102,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // 새 닉네임을 먼저 확보한다. 실패(다른 소켓이 선점)하면 옛 슬롯은 건드리지 않아야
     // 사용자가 아무 데도 못 남는 상황을 피할 수 있다 → 순서상 add 를 remove 보다 앞에 둔다.
     const add = await this.roomService.addParticipant(roomId, nickname);
-    if (!add.added) return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+    if (add.status === 'full') return this.fail(client, ERROR_CODES.ROOM_FULL);
+    if (add.status === 'taken') {
+      return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+    }
 
     // 이 소켓이 이미 다른 닉네임으로 입장해 있었다면 옛 슬롯을 비워 유령 참가자를 막는다.
     // 최종(옛 닉네임 제거 후) 목록으로 broadcast 해야 카운트가 정확하다.

@@ -9,11 +9,9 @@ import { ERROR_CODES } from '../../common/constants/error-code';
 import { Item, RoomStatePayload } from './room.types';
 
 /**
- * 방 서비스 — 방 생성/조회.
+ * 방 서비스 — 방 생성/조회/참가자.
  * 방 데이터는 전부 Redis(key: room:{id}), TTL 3일.
- *
- * TTL "활동 시마다 리셋" 은 계획서상 Phase 3 항목이라 아직 넣지 않았다.
- * 지금은 생성 시점에만 TTL 을 건다.
+ * 활동(입장·항목변경·게임실행) 시 touchRoom 으로 TTL 을 다시 리셋한다(활발한 방은 안 사라지게).
  */
 @Injectable()
 export class RoomService {
@@ -28,6 +26,8 @@ export class RoomService {
 
   private readonly ttlSeconds: number;
   private readonly frontendBaseUrl: string;
+  /** 방 정원(참가자 수 상한). 초과하면 ROOM_FULL. */
+  private readonly maxParticipants: number;
 
   constructor(
     private readonly redis: RedisService,
@@ -40,6 +40,9 @@ export class RoomService {
     this.frontendBaseUrl = this.config.get<string>(
       'FRONTEND_BASE_URL',
       'http://localhost:5173',
+    );
+    this.maxParticipants = Number(
+      this.config.get<string>('ROOM_MAX_PARTICIPANTS', '50'),
     );
   }
 
@@ -150,31 +153,68 @@ export class RoomService {
 
   /**
    * 참가자 입장 — 닉네임을 players Set 에 추가.
-   * SADD 반환값(1=새로 추가, 0=이미 존재)으로 닉네임 중복을 원자적으로 판별한다.
-   * added=false 면 게이트웨이가 NICKNAME_TAKEN 을 돌려준다.
+   * 결과 status 로 게이트웨이가 응답을 정한다:
+   *  - 'added' : 입장 성공
+   *  - 'taken' : 닉네임 중복(SADD 가 0 반환) → NICKNAME_TAKEN
+   *  - 'full'  : 정원 초과 → ROOM_FULL
    */
   async addParticipant(
     roomId: string,
     nickname: string,
   ): Promise<{
-    added: boolean;
+    status: 'added' | 'taken' | 'full';
     participants: string[];
     participantCount: number;
   }> {
-    const added =
-      (await this.redis.client.sadd(
-        RedisKeys.roomPlayers(roomId),
-        nickname,
-      )) === 1;
+    const key = RedisKeys.roomPlayers(roomId);
 
-    if (added) {
-      await this.stats.incrementParticipants();
+    // 이미 들어와 있는 닉네임의 재요청은 정원과 무관하게 통과시켜야 한다(정원 체크는 신규만).
+    const alreadyIn = (await this.redis.client.sismember(key, nickname)) === 1;
+    if (!alreadyIn) {
+      const count = await this.redis.client.scard(key);
+      if (count >= this.maxParticipants) {
+        return { status: 'full', participants: [], participantCount: count };
+      }
     }
 
-    const participants = await this.redis.client.smembers(
-      RedisKeys.roomPlayers(roomId),
-    );
-    return { added, participants, participantCount: participants.length };
+    const added = (await this.redis.client.sadd(key, nickname)) === 1;
+    if (!added) {
+      const participants = await this.redis.client.smembers(key);
+      return {
+        status: 'taken',
+        participants,
+        participantCount: participants.length,
+      };
+    }
+
+    await this.stats.incrementParticipants();
+    await this.touchRoom(roomId); // 활동 발생 → TTL 리셋
+
+    const participants = await this.redis.client.smembers(key);
+    return {
+      status: 'added',
+      participants,
+      participantCount: participants.length,
+    };
+  }
+
+  /** 방 TTL(초). 다른 서비스가 결과 키 등에 같은 수명을 줄 때 참조한다. */
+  get ttl(): number {
+    return this.ttlSeconds;
+  }
+
+  /**
+   * 활동 발생 시 방 관련 키들의 TTL 을 다시 3일로 리셋한다(활발한 방은 안 사라지게).
+   * players·onlineRoom·votes 는 room 이 살아있는 동안만 의미가 있어 같은 수명을 준다.
+   */
+  async touchRoom(roomId: string): Promise<void> {
+    await this.redis.client
+      .multi()
+      .expire(RedisKeys.room(roomId), this.ttlSeconds)
+      .expire(RedisKeys.roomPlayers(roomId), this.ttlSeconds)
+      .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
+      .exec();
   }
 
   /** 참가자 퇴장 — players Set 에서 제거 */

@@ -23,6 +23,12 @@ export const RedisKeys = {
   /** 사다리에서 공개된 시작칸 (Set) — 재접속 시 이어보기용 */
   gameLadderRevealed: (roomId: string) => `game:${roomId}:ladder:revealed`,
 
+  /** 제비뽑기 라운드 (String, JSON) — { count, blanks, blankSet } (꽝 위치는 숨김) */
+  gameDraw: (roomId: string) => `game:${roomId}:draw`,
+
+  /** 제비뽑기 뽑힌 제비 (Hash) — index → 닉네임. HSETNX 로 먼저 뽑은 사람이 잠근다. */
+  gameDrawPicks: (roomId: string) => `game:${roomId}:draw:picks`,
+
   /** 전체 접속자 수 (String, 카운터) */
   onlineCount: () => `online:count`,
 

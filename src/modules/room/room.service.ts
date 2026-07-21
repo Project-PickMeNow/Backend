@@ -140,6 +140,25 @@ export class RoomService {
     return (await this.redis.client.exists(RedisKeys.room(roomId))) === 1;
   }
 
+  /** 방 진행 상태 (waiting|playing|finished). 없으면 'waiting'. */
+  async getStatus(roomId: string): Promise<string> {
+    const status = await this.redis.client.hget(
+      RedisKeys.room(roomId),
+      'status',
+    );
+    return status ?? 'waiting';
+  }
+
+  /** 이 닉네임이 이미 이 방의 참가자인지 (게임 중 재접속 허용 판별용) */
+  async isParticipant(roomId: string, nickname: string): Promise<boolean> {
+    return (
+      (await this.redis.client.sismember(
+        RedisKeys.roomPlayers(roomId),
+        nickname,
+      )) === 1
+    );
+  }
+
   /** hostToken 이 이 방의 것과 일치하는지 (host 역할 판별) */
   async isHost(
     roomId: string,
@@ -155,14 +174,23 @@ export class RoomService {
 
   /** connection 직후 접속자에게 보낼 방 전체 스냅샷 (진행 중 사다리 포함 — 재접속·늦은 입장 복원) */
   async getRoomState(roomId: string): Promise<RoomStatePayload> {
-    const [room, participants, onlineCount, ladderRaw, revealedRaw] =
-      await Promise.all([
-        this.redis.client.hgetall(RedisKeys.room(roomId)),
-        this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
-        this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
-        this.redis.client.get(RedisKeys.gameLadder(roomId)),
-        this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
-      ]);
+    const [
+      room,
+      participants,
+      onlineCount,
+      ladderRaw,
+      revealedRaw,
+      drawRaw,
+      drawPicks,
+    ] = await Promise.all([
+      this.redis.client.hgetall(RedisKeys.room(roomId)),
+      this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+      this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
+      this.redis.client.get(RedisKeys.gameLadder(roomId)),
+      this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
+      this.redis.client.get(RedisKeys.gameDraw(roomId)),
+      this.redis.client.hgetall(RedisKeys.gameDrawPicks(roomId)),
+    ]);
 
     const ladderSnapshot = this.parseLadder(ladderRaw);
     return {
@@ -181,7 +209,34 @@ export class RoomService {
       ladderRevealed: revealedRaw
         .map((s) => Number(s))
         .filter((n) => Number.isInteger(n)),
+      draw: this.parseDraw(drawRaw, drawPicks),
     };
+  }
+
+  /**
+   * 저장된 제비뽑기 라운드(개수·꽝수·꽝위치) + 뽑힌 제비 해시를 room:state.draw 로 조립한다.
+   * 섞기 전이거나 깨져 있으면 null. 꽝 위치(blankSet)는 뽑힌 제비의 blank 판정에만 쓰고 그대로 내보내지 않는다.
+   */
+  private parseDraw(
+    raw: string | null,
+    picksHash: Record<string, string>,
+  ): RoomStatePayload['draw'] {
+    if (!raw) return null;
+    try {
+      const round = JSON.parse(raw) as {
+        count: number;
+        blanks: number;
+        blankSet: number[];
+      };
+      const picks = Object.entries(picksHash).map(([i, by]) => ({
+        index: Number(i),
+        by,
+        blank: round.blankSet.includes(Number(i)),
+      }));
+      return { count: round.count, blanks: round.blanks, picks };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -279,6 +334,8 @@ export class RoomService {
       .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameDraw(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameDrawPicks(roomId), this.ttlSeconds)
       .exec();
   }
 

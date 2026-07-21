@@ -241,6 +241,75 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
+  // ── 제비뽑기(인터랙티브) 규칙: 1인 1제비(host 제외) · 다 뽑아야 재섞기 ──
+  describe('제비뽑기(인터랙티브) 규칙', () => {
+    it('참가자는 1인 1제비 — 두 번째 뽑기는 거절 (ALREADY_PICKED)', async () => {
+      const { host, guest } = await setupGame('draw');
+      try {
+        await guest.emitWithAck('room:join', { nickname: '뽑는이' });
+        const shuffled = once(guest, 'draw:shuffled');
+        await host.emitWithAck('draw:shuffle', { count: 4, blanks: 1 });
+        await shuffled;
+
+        const a0 = (await guest.emitWithAck('draw:pick', { index: 0 })) as Ack;
+        expect(a0).toEqual({ ok: true });
+        const a1 = (await guest.emitWithAck('draw:pick', { index: 1 })) as Ack;
+        expect(a1).toEqual({ ok: false, code: 'ALREADY_PICKED' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('호스트는 여러 제비를 뽑을 수 있다', async () => {
+      const { host, guest } = await setupGame('draw');
+      try {
+        const shuffled = once(host, 'draw:shuffled');
+        await host.emitWithAck('draw:shuffle', { count: 4, blanks: 1 });
+        await shuffled;
+        expect(await host.emitWithAck('draw:pick', { index: 0 })).toEqual({
+          ok: true,
+        });
+        expect(await host.emitWithAck('draw:pick', { index: 1 })).toEqual({
+          ok: true,
+        });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('제비를 다 뽑기 전엔 다시 섞을 수 없다 (GAME_RUNNING)', async () => {
+      const { host, guest } = await setupGame('draw');
+      try {
+        const shuffled = once(host, 'draw:shuffled');
+        await host.emitWithAck('draw:shuffle', { count: 2, blanks: 1 });
+        await shuffled;
+
+        // 1개만 뽑은 상태 → 재섞기 거절
+        await host.emitWithAck('draw:pick', { index: 0 });
+        const early = (await host.emitWithAck('draw:shuffle', {
+          count: 2,
+          blanks: 1,
+        })) as Ack;
+        expect(early).toEqual({ ok: false, code: 'GAME_RUNNING' });
+
+        // 마지막 제비까지 뽑으면 재섞기 허용
+        await host.emitWithAck('draw:pick', { index: 1 });
+        const shuffled2 = once(host, 'draw:shuffled');
+        const okAck = (await host.emitWithAck('draw:shuffle', {
+          count: 2,
+          blanks: 1,
+        })) as Ack;
+        expect(okAck).toEqual({ ok: true });
+        await shuffled2;
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+  });
+
   // 사다리 화면은 방 items 흐름과 분리돼, 호스트가 build 때 칸마다 상단(이름)·하단(당첨항목)을 보낸다.
   const TOP = ['가위', '바위', '보'];
   const BOTTOM = ['꽝', '당첨', '한번더'];
@@ -411,5 +480,157 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       host.disconnect();
       guest.disconnect();
     }
+  });
+
+  // ── game:begin — '게임 시작 ▶' 을 누르는 즉시 결과 전에 참가자도 게임 화면으로 ──
+  describe('game:begin', () => {
+    it('host 가 시작을 누르면 결과 전에도 전원이 game:begin 을 받고, 늦은 입장도 playing 을 본다', async () => {
+      const { roomId, host, guest } = await setupGame('roulette');
+      try {
+        const hb = once<{ gameType: string }>(host, 'game:begin');
+        const gb = once<{ gameType: string }>(guest, 'game:begin');
+
+        const ack = (await host.emitWithAck('game:begin')) as Ack;
+        expect(ack).toEqual({ ok: true });
+
+        const [h, g] = await Promise.all([hb, gb]);
+        expect(h.gameType).toBe('roulette');
+        expect(g.gameType).toBe('roulette');
+
+        const late = connect(roomId);
+        try {
+          const state = await once<{ status: string }>(late, 'room:state');
+          expect(state.status).toBe('playing'); // 결과 없이도 playing 으로 복원
+        } finally {
+          late.disconnect();
+        }
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('아직 게임 종류를 안 골랐으면 거부한다 (VALIDATION_ERROR)', async () => {
+      const { host, guest } = await setup(); // game:select 이전
+      try {
+        const ack = (await host.emitWithAck('game:begin')) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'VALIDATION_ERROR' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('참가자는 호출할 수 없다 (NOT_HOST)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        const ack = (await guest.emitWithAck('game:begin')) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'NOT_HOST' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+  });
+
+  // ── game:replay — '같은 항목으로 다시하기': game:reset 초기화 + 참가자에게만 한 판 더 확인 ──
+  // ── room:return — '방으로 돌아가기': 서버 상태만 대기로 리셋(참가자 강제 이동 없음) ──
+  describe('room:return', () => {
+    it('호스트가 방으로 돌아가면 방이 대기(waiting) 상태로 리셋된다', async () => {
+      const { roomId, host, guest } = await setupGame('roulette');
+      try {
+        const begun = Promise.all([
+          once(host, 'game:begin'),
+          once(guest, 'game:begin'),
+        ]);
+        await host.emitWithAck('game:begin');
+        await begun;
+
+        const ack = (await host.emitWithAck('room:return')) as Ack;
+        expect(ack).toEqual({ ok: true });
+
+        // 서버 상태가 waiting 으로 돌아가, 늦게 들어온 소켓도 대기 화면(room:state)을 받는다.
+        const late = connect(roomId);
+        try {
+          const state = await once<{ status: string }>(late, 'room:state');
+          expect(state.status).toBe('waiting');
+        } finally {
+          late.disconnect();
+        }
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('참가자는 호출할 수 없다 (NOT_HOST)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        const ack = (await guest.emitWithAck('room:return')) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'NOT_HOST' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+  });
+
+  // ── roulette:draft — 호스트가 원판 칸에 입력 중인 라벨을 참가자가 실시간으로(저장 없이) 본다 ──
+  describe('roulette:draft', () => {
+    it('참가자가 실시간으로 받는다(items 는 그대로 — 저장하지 않는 relay)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        const draft = once<{ labels: string[] }>(guest, 'roulette:draft');
+        const ack = (await host.emitWithAck('roulette:draft', {
+          labels: ['가위', '바위', '보'],
+        })) as Ack;
+        expect(ack).toEqual({ ok: true });
+
+        const { labels } = await draft;
+        expect(labels).toEqual(['가위', '바위', '보']);
+
+        // 저장되지 않는다 — 방 items 는 setupGame 이 넣은 3개 그대로.
+        const { items } = await new Promise<{ items: Item[] }>((resolve) => {
+          host.emit('item:add', { label: '__probe__' });
+          host.once('item:added', (d: { items: Item[] }) => resolve(d));
+        });
+        expect(items.map((i) => i.label)).not.toContain('가위');
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('호스트 자신은 자기가 보낸 draft 를 받지 않는다(발신자 제외 relay)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        let hostGotDraft = false;
+        host.once('roulette:draft', () => {
+          hostGotDraft = true;
+        });
+        const guestSaw = once<{ labels: string[] }>(guest, 'roulette:draft');
+        await host.emitWithAck('roulette:draft', { labels: ['a'] });
+        await guestSaw;
+
+        await new Promise((r) => setTimeout(r, 100));
+        expect(hostGotDraft).toBe(false);
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('참가자는 호출할 수 없다 (NOT_HOST)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        const ack = (await guest.emitWithAck('roulette:draft', {
+          labels: ['x'],
+        })) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'NOT_HOST' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
   });
 });

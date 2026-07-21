@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { RedisService } from '../../infra/redis/redis.service';
 import { StatsService } from '../stats/stats.service';
 import { RedisKeys } from '../../common/constants/redis-keys';
@@ -8,6 +8,9 @@ import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
 import { RoomService } from '../room/room.service';
 import {
+  DrawPick,
+  DrawShuffledPayload,
+  DrawState,
   GameResult,
   LadderBuiltPayload,
   LadderResultPayload,
@@ -19,6 +22,7 @@ import { ENGINES } from './engines';
 import { VoteEngine } from './engines/vote';
 import { generateLadder } from './engines/ladder';
 import { LADDER } from '../../common/constants/ladder';
+import { DRAW } from '../../common/constants/draw';
 
 /**
  * 도메인 규칙 위반을 나타내는 에러. code 는 ERROR_CODES 의 값이며
@@ -101,6 +105,22 @@ export class GameService {
   }
 
   /**
+   * host 가 '게임 시작 ▶' 을 눌러 참가자 대기(QR) 화면을 벗어나는 순간 — 아직 결과도,
+   * 항목·라벨 편집도 끝나지 않았지만, 참가자를 대기 화면 대신 실제 게임 화면으로 옮겨
+   * 호스트가 목록을 채우는 과정과 게임이 진행되는 과정을 실시간으로 함께 보게 한다.
+   * status 만 playing 으로 바꿀 뿐 결과 계산은 각 게임의 시작 이벤트가 따로 담당한다.
+   */
+  async beginGame(roomId: string): Promise<GameType> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (!this.isGameType(room.gameType)) {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 game:select 로 종류를 안 골랐다.
+    }
+    await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
+    await this.rooms.touchRoom(roomId);
+    return room.gameType;
+  }
+
+  /**
    * 게임 실행 — 선택된 gameType 의 엔진으로 결과를 계산·저장하고 stats +1.
    * 결과는 서버가 한 번만 계산하므로 모든 클라이언트가 같은 결과를 본다(WS4의 핵심).
    */
@@ -144,6 +164,8 @@ export class GameService {
       RedisKeys.gameVotes(roomId),
       RedisKeys.gameLadder(roomId),
       RedisKeys.gameLadderRevealed(roomId),
+      RedisKeys.gameDraw(roomId),
+      RedisKeys.gameDrawPicks(roomId),
     );
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
   }
@@ -385,6 +407,137 @@ export class GameService {
   /** votes 해시의 값(각 투표자가 고른 itemId)만 뽑아온다. */
   private async loadChoices(roomId: string): Promise<string[]> {
     return this.redis.client.hvals(RedisKeys.gameVotes(roomId));
+  }
+
+  // ── 제비뽑기 (인터랙티브, 잠금형) ─────────────────────────────
+  // 호스트가 인원수(제비 개수 N)·꽝 개수 K 를 정하고 "제비 섞기"(shuffle)를 누르면
+  // 서버가 K개의 꽝 위치를 무작위 배치한다. 방장·참가자가 각자 제비를 뽑고(pick),
+  // 먼저 뽑힌 제비는 HSETNX 로 잠긴다(중복 불가). 뽑는 순간 그 제비의 꽝 여부가 공개된다.
+
+  /**
+   * 제비 섞기 — N개 제비 중 K개를 꽝으로 무작위 배치하고 새 라운드를 연다(옛 뽑기 기록 삭제).
+   * 꽝 위치(blankSet)는 서버에만 저장하고 클라이언트엔 개수만 알린다(뽑기 전 스포일러 방지).
+   */
+  async shuffleDraw(
+    roomId: string,
+    count: number,
+    blanks: number,
+  ): Promise<DrawShuffledPayload> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'draw') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    // 이미 라운드가 있으면, 제비를 다 뽑기 전엔 다시 섞을 수 없다(진행 중 리셋 방지).
+    const existingRaw = await this.redis.client.get(RedisKeys.gameDraw(roomId));
+    if (existingRaw) {
+      const prev = JSON.parse(existingRaw) as { count: number };
+      const picked = await this.redis.client.hlen(
+        RedisKeys.gameDrawPicks(roomId),
+      );
+      if (picked < prev.count) throw new GameError(ERROR_CODES.GAME_RUNNING);
+    }
+
+    const c = Math.min(DRAW.MAX, Math.max(DRAW.MIN, Math.floor(count)));
+    // 꽝은 최소 1개, 최대 c-1개(전부 꽝이면 뽑을 이유가 없다).
+    const b = Math.min(c - 1, Math.max(1, Math.floor(blanks)));
+
+    // [0..c-1] 을 섞어 앞의 b개를 꽝 위치로.
+    const order = Array.from({ length: c }, (_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = randomInt(i + 1);
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    const blankSet = order.slice(0, b).sort((x, y) => x - y);
+
+    await this.redis.client.set(
+      RedisKeys.gameDraw(roomId),
+      JSON.stringify({ count: c, blanks: b, blankSet }),
+    );
+    // 새 라운드 — 옛 뽑기 기록을 지운다.
+    await this.redis.client.del(RedisKeys.gameDrawPicks(roomId));
+    await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
+    await this.stats.incrementPlays();
+    await this.rooms.touchRoom(roomId);
+
+    return { count: c, blanks: b };
+  }
+
+  /**
+   * 제비 뽑기 — index 제비를 by(닉네임/'호스트')가 잠근다.
+   * HSETNX 로 원자적 선점: 이미 뽑힌 제비면 0 → GAME_RUNNING(이미 뽑힘)으로 거절.
+   * 성공하면 그 제비의 꽝 여부를 공개해 broadcast 하게 반환한다.
+   */
+  /**
+   * 제비 하나 뽑기.
+   * - 제비 잠금: HSETNX(index→by) 로 먼저 누른 사람이 선점(중복 뽑기 불가).
+   * - 인원 제한: 참가자(비 host)는 한 라운드에 딱 1개만. host 는 여러 개 뽑을 수 있다.
+   *   같은 닉네임이 이미 뽑았으면 거절. 빠른 더블클릭 레이스를 막으려고 잠금 뒤 재확인해
+   *   2개째가 걸리면 방금 잠근 제비를 되돌린다(그 제비는 다시 뽑을 수 있게).
+   */
+  async pickDraw(
+    roomId: string,
+    by: string,
+    index: number,
+    isHost: boolean,
+  ): Promise<DrawPick> {
+    const raw = await this.redis.client.get(RedisKeys.gameDraw(roomId));
+    if (!raw) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 섞기 전
+    const round = JSON.parse(raw) as {
+      count: number;
+      blanks: number;
+      blankSet: number[];
+    };
+
+    if (!Number.isInteger(index) || index < 0 || index >= round.count) {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+
+    const picksKey = RedisKeys.gameDrawPicks(roomId);
+
+    // 참가자는 1인 1제비 — 잠그기 전에 먼저 확인(정상 경로 차단).
+    if (!isHost) {
+      const already = await this.redis.client.hvals(picksKey);
+      if (already.includes(by)) {
+        throw new GameError(ERROR_CODES.ALREADY_PICKED);
+      }
+    }
+
+    // 먼저 뽑은 사람이 잠근다(원자적). 이미 있으면 0.
+    const locked = await this.redis.client.hsetnx(picksKey, String(index), by);
+    if (locked === 0) throw new GameError(ERROR_CODES.GAME_RUNNING); // 이미 뽑힌 제비
+
+    // 잠근 뒤 재확인 — 동시 뽑기 레이스로 같은 닉네임이 2개가 됐으면 방금 것을 되돌린다.
+    if (!isHost) {
+      const vals = await this.redis.client.hvals(picksKey);
+      if (vals.filter((v) => v === by).length > 1) {
+        await this.redis.client.hdel(picksKey, String(index));
+        throw new GameError(ERROR_CODES.ALREADY_PICKED);
+      }
+    }
+
+    await this.rooms.touchRoom(roomId);
+    return { index, by, blank: round.blankSet.includes(index) };
+  }
+
+  /** room:state 복원용 — 섞기 전이면 null, 진행 중이면 개수·꽝수·이미 뽑힌 제비들. */
+  async getDrawState(roomId: string): Promise<DrawState | null> {
+    const raw = await this.redis.client.get(RedisKeys.gameDraw(roomId));
+    if (!raw) return null;
+    const round = JSON.parse(raw) as {
+      count: number;
+      blanks: number;
+      blankSet: number[];
+    };
+    const picksHash = await this.redis.client.hgetall(
+      RedisKeys.gameDrawPicks(roomId),
+    );
+    const picks: DrawPick[] = Object.entries(picksHash).map(([i, by]) => ({
+      index: Number(i),
+      by,
+      blank: round.blankSet.includes(Number(i)),
+    }));
+    return { count: round.count, blanks: round.blanks, picks };
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────

@@ -67,14 +67,20 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.id,
       );
 
+      // 대기 중에만 참가자 슬롯을 비운다. 게임 진행 중(playing/finished)에는 새로고침·일시
+      // 끊김으로 슬롯을 잃으면 입장 잠금(ROOM_LOCKED)에 막혀 다시 못 들어오므로, 슬롯을
+      // 유지해 재접속(reclaim)을 허용한다 — 온라인 카운트만 갱신한다.
       if (nickname) {
-        const { participants, participantCount } =
-          await this.roomService.removeParticipant(roomId, nickname);
-        this.server.to(roomId).emit('participant:left', {
-          nickname,
-          participants,
-          participantCount,
-        });
+        const status = await this.roomService.getStatus(roomId);
+        if (status === 'waiting') {
+          const { participants, participantCount } =
+            await this.roomService.removeParticipant(roomId, nickname);
+          this.server.to(roomId).emit('participant:left', {
+            nickname,
+            participants,
+            participantCount,
+          });
+        }
       }
 
       this.server.to(roomId).emit('online:count', { onlineCount });
@@ -99,11 +105,34 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const previous = client.data.nickname;
     if (previous === nickname) return { ok: true };
 
+    // 게임 진행 중(대기 상태가 아님)에는 신규 참가자 입장을 막는다.
+    // 단, 이미 이 방의 멤버였던 사람(새로고침·재접속)은 그대로 다시 들어올 수 있어야 한다.
+    const status = await this.roomService.getStatus(roomId);
+    if (status !== 'waiting') {
+      const alreadyMember = await this.roomService.isParticipant(
+        roomId,
+        nickname,
+      );
+      if (!alreadyMember) return this.fail(client, ERROR_CODES.ROOM_LOCKED);
+    }
+
     // 새 닉네임을 먼저 확보한다. 실패(다른 소켓이 선점)하면 옛 슬롯은 건드리지 않아야
     // 사용자가 아무 데도 못 남는 상황을 피할 수 있다 → 순서상 add 를 remove 보다 앞에 둔다.
     const add = await this.roomService.addParticipant(roomId, nickname);
     if (add.status === 'full') return this.fail(client, ERROR_CODES.ROOM_FULL);
     if (add.status === 'taken') {
+      // 게임 중에는 신규 입장이 이미 막혀 있어(위 ROOM_LOCKED), 같은 닉네임 요청은
+      // 그 닉네임 주인의 재접속(reclaim)으로 보고 통과시킨다. 대기 중에는 중복 선택
+      // 방지를 위해 그대로 거절한다.
+      if (status !== 'waiting') {
+        client.data.nickname = nickname;
+        this.server.to(roomId).emit('participant:joined', {
+          nickname,
+          participants: add.participants,
+          participantCount: add.participantCount,
+        });
+        return { ok: true };
+      }
       return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
     }
 

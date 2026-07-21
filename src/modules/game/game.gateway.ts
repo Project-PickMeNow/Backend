@@ -16,10 +16,13 @@ type Ack = { ok: true } | { ok: false; code: string };
  * connection 때 RoomGateway 가 채워둔 socket.data(roomId·role)를 그대로 읽어 host 를 검증한다
  * — 이벤트마다 hostToken 을 다시 받지 않는다.
  *
- * 다루는 이벤트 (전부 host 전용):
+ * 다루는 이벤트 (전부 host 전용, vote:cast/draw:pick 만 참가자도 가능):
  *  item:add / item:remove / item:reorder — 항목
- *  game:select / game:start / game:reset  — 게임 진행
- *  (vote:cast / vote:close 는 참가자용이라 이후 단계에서 구현)
+ *  game:select / game:begin / game:start / room:return — 게임 진행
+ *  vote:cast / vote:close — 투표
+ *  ladder:build / ladder:reveal / ladder:result — 사다리
+ *  draw:shuffle / draw:pick — 제비뽑기
+ *  roulette:draft — 원판 실시간 편집 미리보기
  */
 @WebSocketGateway({ namespace: '/rooms', cors: true })
 export class GameGateway implements OnGatewayDisconnect {
@@ -96,6 +99,18 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
+  /**
+   * host '게임 시작 ▶' — 아직 결과는 없지만 참가자를 대기(QR) 화면에서 실제 게임 화면으로
+   * 옮겨, 이후 호스트가 항목·라벨을 채우는 과정과 게임이 진행되는 과정을 실시간으로 보게 한다.
+   */
+  @SubscribeMessage('game:begin')
+  async handleGameBegin(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const gameType = await this.gameService.beginGame(roomId);
+      this.server.to(roomId).emit('game:begin', { gameType });
+    });
+  }
+
   @SubscribeMessage('game:start')
   async handleGameStart(
     client: AppSocket,
@@ -112,11 +127,35 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
-  @SubscribeMessage('game:reset')
-  async handleGameReset(client: AppSocket): Promise<Ack> {
+  /**
+   * host '방으로 돌아가기' — 라운드를 접어(결과·투표·사다리·제비 데이터 삭제) 방을 다시
+   * 대기 상태로 되돌린다. 이때 참가자를 강제로 이동시키지 않는다 — 참가자는 각자 결과창의
+   * '방으로 돌아가기'를 눌러 로비로 오고(1분 내 안 오면 클라이언트가 강퇴 안내), 서버는
+   * 상태만 waiting 으로 바꿔 이후 게임종류 재선택·재시작·신규 입장이 다시 열리게 한다.
+   * room 이벤트지만 GameService.resetGame 재사용을 위해 여기 둔다(RoomModule↔GameModule 순환 의존 회피).
+   */
+  @SubscribeMessage('room:return')
+  async handleRoomReturn(client: AppSocket): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
       await this.gameService.resetGame(roomId);
-      this.server.to(roomId).emit('game:reset', {});
+    });
+  }
+
+  /**
+   * host 원판 실시간 편집 미리보기 — 저장하지 않는 일회성 relay. 호스트가 원판 칸에
+   * 타이핑하는 동안 참가자도 같은 라벨을 실시간으로 보게 한다('돌리기'를 눌러야 items 로 확정된다).
+   */
+  @SubscribeMessage('roulette:draft')
+  async handleRouletteDraft(
+    client: AppSocket,
+    payload: { labels?: string[] },
+  ): Promise<Ack> {
+    return this.hostAction(client, (roomId) => {
+      const labels = Array.isArray(payload?.labels)
+        ? payload.labels.filter((l): l is string => typeof l === 'string')
+        : [];
+      client.broadcast.to(roomId).emit('roulette:draft', { labels });
+      return Promise.resolve();
     });
   }
 
@@ -200,6 +239,55 @@ export class GameGateway implements OnGatewayDisconnect {
       const result = await this.gameService.resultLadder(roomId);
       this.server.to(roomId).emit('ladder:result', result);
     });
+  }
+
+  /**
+   * host 제비 섞기 — 인원수(count)·꽝개수(blanks)로 꽝 위치를 무작위 배치하고 새 라운드를 연다.
+   * 전원에게 draw:shuffled(개수·꽝수만) 를 알려 섞기 애니메이션을 함께 보게 한다.
+   */
+  @SubscribeMessage('draw:shuffle')
+  async handleDrawShuffle(
+    client: AppSocket,
+    payload: { count?: number; blanks?: number },
+  ): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const res = await this.gameService.shuffleDraw(
+        roomId,
+        payload?.count ?? 0,
+        payload?.blanks ?? 0,
+      );
+      this.server.to(roomId).emit('draw:shuffled', res);
+    });
+  }
+
+  /**
+   * 제비 뽑기 — host·참가자 누구나. index 제비를 먼저 뽑은 사람이 잠근다(HSETNX, 중복 불가).
+   * 뽑는 순간 그 제비의 꽝 여부가 공개돼 전원에게 draw:picked 로 broadcast 된다.
+   * host 는 닉네임이 없으므로 '호스트' 로 표기한다.
+   */
+  @SubscribeMessage('draw:pick')
+  async handleDrawPick(
+    client: AppSocket,
+    payload: { index?: number },
+  ): Promise<Ack> {
+    const { roomId, nickname, role } = client.data;
+    if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
+    const by = nickname ?? (role === 'host' ? '호스트' : undefined);
+    if (!by) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+
+    try {
+      const picked = await this.gameService.pickDraw(
+        roomId,
+        by,
+        payload?.index ?? -1,
+        role === 'host',
+      );
+      this.server.to(roomId).emit('draw:picked', picked);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof GameError) return this.fail(client, err.code);
+      throw err;
+    }
   }
 
   /**

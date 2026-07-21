@@ -7,6 +7,8 @@ export const ERROR_CODES = {
   NICKNAME_TAKEN: 'NICKNAME_TAKEN', // 닉네임 중복
   NEED_MORE_ITEMS: 'NEED_MORE_ITEMS', // 항목 2개 미만
   GAME_RUNNING: 'GAME_RUNNING', // 이미 게임 진행 중
+  ALREADY_PICKED: 'ALREADY_PICKED', // 제비뽑기 — 참가자가 이미 1개를 뽑음(1인 1제비)
+  ROOM_LOCKED: 'ROOM_LOCKED', // 게임 진행 중이라 신규 입장 불가
   VALIDATION_ERROR: 'VALIDATION_ERROR', // 필드 누락·형식 오류
 } as const;
 

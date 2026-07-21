@@ -61,6 +61,31 @@ export interface LadderResultPayload {
   pairs: LadderRevealedPayload[]; // 시작칸 순서대로 topIndex 0..columns-1
 }
 
+// ── 제비뽑기 (인터랙티브, 잠금형) ─────────────────────────────────
+// 룰렛/투표와 달리 game:result 로 안 끝난다. 호스트가 인원수(제비 개수)·꽝 개수를 정하고
+// draw:shuffle 로 꽝 위치를 무작위 배치하면, 방장·참가자가 각자 draw:pick 으로 제비를 뽑는다.
+// 먼저 뽑힌 제비는 잠기고(HSETNX), 뽑는 순간 그 제비의 꽝 여부가 공개된다.
+
+/** 뽑힌 제비 하나 (draw:picked broadcast 페이로드이기도 하다) */
+export interface DrawPick {
+  index: number; // 몇 번째 제비
+  by: string; // 뽑은 사람 (참가자 닉네임 또는 '호스트')
+  blank: boolean; // 꽝 여부
+}
+
+/** 제비뽑기 진행 상태 (room:state 복원용). 아직 섞기 전이면 null. */
+export interface DrawState {
+  count: number; // 제비 개수(= 인원수)
+  blanks: number; // 꽝 개수
+  picks: DrawPick[]; // 이미 뽑힌 제비들
+}
+
+/** draw:shuffled broadcast — 섞기 완료, 이제 뽑기 가능(꽝 위치는 숨김). */
+export interface DrawShuffledPayload {
+  count: number;
+  blanks: number;
+}
+
 /** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */
 export interface VoteTallyEntry {
   item: Item;

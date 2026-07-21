@@ -1,6 +1,6 @@
 import { SlotEngine } from './slot';
 import { MultiWinnerEngine } from './multi-winner';
-import { LadderEngine } from './ladder';
+import { generateLadder } from './ladder';
 import { shuffle, pickN } from './random';
 import { Item } from '../../room/room.types';
 
@@ -75,18 +75,42 @@ describe('MultiWinnerEngine (draw/balloon)', () => {
   });
 });
 
-describe('LadderEngine', () => {
-  const engine = new LadderEngine();
-  it('모든 시작 항목이 매핑에 등장하고, 도착 집합은 항목 전체와 같다(순열)', () => {
-    const r = engine.run(items);
-    expect(r.type).toBe('ladder');
-    expect(r.matching).toHaveLength(items.length);
-    expect(r.matching.map((m) => m.from)).toEqual(items); // 시작은 순서대로 전부
-    expect(new Set(r.matching.map((m) => m.to.id))).toEqual(
-      new Set(items.map((i) => i.id)), // 도착도 항목 전체(중복·누락 없음)
-    );
+describe('generateLadder', () => {
+  it('mapping 은 항상 순열이다(모든 도착칸이 정확히 한 번씩)', () => {
+    for (let n = 2; n <= 10; n++) {
+      for (let t = 0; t < 20; t++) {
+        const ladder = generateLadder(n);
+        expect(ladder.columns).toBe(n);
+        expect(ladder.mapping).toHaveLength(n);
+        // 도착칸 집합 = {0..n-1} (중복·누락 없음)
+        expect([...ladder.mapping].sort((a, b) => a - b)).toEqual(
+          Array.from({ length: n }, (_, i) => i),
+        );
+      }
+    }
   });
-  it('빈 배열이면 예외', () => {
-    expect(() => engine.run([])).toThrow();
+
+  it('가로줄은 유효 범위 안에 있고, 같은 행에서 한 세로줄이 두 줄에 물리지 않는다', () => {
+    const ladder = generateLadder(6);
+    for (const r of ladder.rungs) {
+      expect(r.col).toBeGreaterThanOrEqual(0);
+      expect(r.col).toBeLessThan(ladder.columns - 1);
+      expect(r.row).toBeGreaterThanOrEqual(0);
+      expect(r.row).toBeLessThan(ladder.rows);
+    }
+    // 같은 행에서 인접 가로줄(col, col+1)이 동시에 있으면 안 됨(경로 모호).
+    for (let row = 0; row < ladder.rows; row++) {
+      const cols = ladder.rungs
+        .filter((r) => r.row === row)
+        .map((r) => r.col)
+        .sort((a, b) => a - b);
+      for (let i = 1; i < cols.length; i++) {
+        expect(cols[i] - cols[i - 1]).toBeGreaterThanOrEqual(2);
+      }
+    }
+  });
+
+  it('칸이 2개 미만이면 예외', () => {
+    expect(() => generateLadder(1)).toThrow();
   });
 });

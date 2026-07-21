@@ -153,14 +153,18 @@ export class RoomService {
     return stored !== null && stored === hostToken;
   }
 
-  /** connection 직후 접속자에게 보낼 방 전체 스냅샷 */
+  /** connection 직후 접속자에게 보낼 방 전체 스냅샷 (진행 중 사다리 포함 — 재접속·늦은 입장 복원) */
   async getRoomState(roomId: string): Promise<RoomStatePayload> {
-    const [room, participants, onlineCount] = await Promise.all([
-      this.redis.client.hgetall(RedisKeys.room(roomId)),
-      this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
-      this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
-    ]);
+    const [room, participants, onlineCount, ladderRaw, revealedRaw] =
+      await Promise.all([
+        this.redis.client.hgetall(RedisKeys.room(roomId)),
+        this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+        this.redis.client.scard(RedisKeys.onlineRoom(roomId)),
+        this.redis.client.get(RedisKeys.gameLadder(roomId)),
+        this.redis.client.smembers(RedisKeys.gameLadderRevealed(roomId)),
+      ]);
 
+    const ladderSnapshot = this.parseLadder(ladderRaw);
     return {
       roomId,
       title: room.title ?? '',
@@ -171,7 +175,32 @@ export class RoomService {
       participantCount: participants.length,
       onlineCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
+      ladder: ladderSnapshot.ladder,
+      ladderLabels: ladderSnapshot.labels,
+      ladderRevealed: revealedRaw
+        .map((s) => Number(s))
+        .filter((n) => Number.isInteger(n)),
     };
+  }
+
+  /**
+   * 저장된 사다리 스냅샷(구조 + 라벨)을 안전하게 파싱한다. 없거나 깨지면 빈 값.
+   * game:{id}:ladder 에는 LadderBuiltPayload({ ladder, labels }) 가 통째로 들어있다.
+   */
+  private parseLadder(raw: string | null): {
+    ladder: RoomStatePayload['ladder'];
+    labels: string[];
+  } {
+    if (!raw) return { ladder: null, labels: [] };
+    try {
+      const built = JSON.parse(raw) as {
+        ladder: RoomStatePayload['ladder'];
+        labels?: string[];
+      };
+      return { ladder: built.ladder ?? null, labels: built.labels ?? [] };
+    } catch {
+      return { ladder: null, labels: [] };
+    }
   }
 
   /**
@@ -240,6 +269,8 @@ export class RoomService {
       .expire(RedisKeys.roomPlayers(roomId), this.ttlSeconds)
       .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
       .exec();
   }
 
@@ -282,6 +313,8 @@ export class RoomService {
       RedisKeys.onlineRoom(roomId),
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
+      RedisKeys.gameLadder(roomId),
+      RedisKeys.gameLadderRevealed(roomId),
     );
   }
 

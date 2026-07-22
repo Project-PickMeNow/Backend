@@ -36,6 +36,21 @@ describe('RoomGateway 실시간 입장 (e2e)', () => {
       });
     });
 
+  /** 지정 시간 안에 이벤트가 '오지 않아야' 통과(true). 오면 false. */
+  const expectNoEvent = (
+    socket: Socket,
+    event: string,
+    ms = 500,
+  ): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const onEvent = () => resolve(false); // 이벤트가 오면 실패로 판정(once 라 자동 해제)
+      socket.once(event, onEvent);
+      setTimeout(() => {
+        socket.off(event, onEvent);
+        resolve(true); // 시간이 다 지나도록 안 왔으면 통과(Promise 는 한 번만 resolve)
+      }, ms);
+    });
+
   const connect = (roomId: string, auth: Record<string, string> = {}): Socket =>
     io(`${baseUrl}/rooms`, {
       auth: { roomId, ...auth },
@@ -130,24 +145,61 @@ describe('RoomGateway 실시간 입장 (e2e)', () => {
     }
   });
 
-  it('한 소켓이 끊기면 남은 소켓이 participant:left 로 감소를 본다', async () => {
+  it('대기 중 소켓이 잠깐 끊겨도 곧바로 참가자에서 빠지지 않는다(재접속 유예)', async () => {
     const { roomId } = await createRoom();
     const a = connect(roomId);
     const b = connect(roomId);
     try {
       await Promise.all([once(a, 'room:state'), once(b, 'room:state')]);
-      await a.emitWithAck('room:join', { nickname: '떠날사람' });
+      await a.emitWithAck('room:join', { nickname: '떠날뻔한사람' });
       await b.emitWithAck('room:join', { nickname: '남을사람' });
 
-      const bSeesLeft = once<{ participantCount: number; nickname: string }>(
-        b,
-        'participant:left',
-      );
+      // 서버 재시작·ping timeout 처럼 잠깐 끊긴 것으로 본다 — 유예 동안 participant:left 가 오면 안 된다.
+      const noLeft = expectNoEvent(b, 'participant:left', 600);
       a.disconnect();
+      expect(await noLeft).toBe(true);
+    } finally {
+      a.disconnect();
+      b.disconnect();
+    }
+  });
 
-      const left = await bSeesLeft;
-      expect(left.nickname).toBe('떠날사람');
-      expect(left.participantCount).toBe(1);
+  it('대기 중 끊겼다가 같은 닉네임으로 재접속하면 튕기지 않고 그대로 복귀한다', async () => {
+    const { roomId } = await createRoom();
+    const a = connect(roomId);
+    const b = connect(roomId);
+    try {
+      await Promise.all([once(a, 'room:state'), once(b, 'room:state')]);
+      await a.emitWithAck('room:join', { nickname: '재접속러' });
+      await b.emitWithAck('room:join', { nickname: '지켜보는사람' });
+
+      // a 끊김 → b 가 online:count 감소를 보면 서버가 유예를 걸어둔 시점이다(동기화 지점).
+      const bSeesDrop = once<{ onlineCount: number }>(b, 'online:count');
+      a.disconnect();
+      await bSeesDrop;
+
+      // 같은 닉네임으로 재접속 → 중복(NICKNAME_TAKEN)이 아니라 복귀(ok)로 통과해야 한다.
+      const a2 = connect(roomId);
+      try {
+        await once(a2, 'room:state');
+        const bSeesRejoin = once<{
+          participantCount: number;
+          participants: string[];
+        }>(b, 'participant:joined');
+        const ack = (await a2.emitWithAck('room:join', {
+          nickname: '재접속러',
+        })) as Ack;
+        expect(ack).toEqual({ ok: true });
+
+        // 방에는 여전히 두 명이 그대로 있어야 한다(재접속러 유지, 유령 없음).
+        const rejoined = await bSeesRejoin;
+        expect(rejoined.participantCount).toBe(2);
+        expect(rejoined.participants.sort()).toEqual(
+          ['재접속러', '지켜보는사람'].sort(),
+        );
+      } finally {
+        a2.disconnect();
+      }
     } finally {
       a.disconnect();
       b.disconnect();

@@ -5,11 +5,13 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
+import { OnModuleDestroy } from '@nestjs/common';
 import { Server } from 'socket.io';
 import { RoomService } from './room.service';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { BALLOON } from '../../common/constants/balloon';
 import { DRAW } from '../../common/constants/draw';
+import { ROOM } from '../../common/constants/room';
 import type { AppSocket } from '../../common/types/socket';
 
 /**
@@ -22,10 +24,25 @@ import type { AppSocket } from '../../common/types/socket';
  *  이 판별 결과(socket.data)를 GameGateway 가 host 검증에 그대로 재사용한다.
  */
 @WebSocketGateway({ namespace: '/rooms', cors: true })
-export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class RoomGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+{
   @WebSocketServer() server: Server;
 
+  // 대기 중 끊긴 참가자의 '유예 후 제거' 타이머. key=`${roomId}:${nickname}`.
+  // 같은 닉네임이 유예 안에 재접속하면 취소한다(재접속 판단은 handleJoin 이 담당).
+  private readonly pendingLeaves = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
   constructor(private readonly roomService: RoomService) {}
+
+  /** 종료 시 걸려 있던 유예 제거 타이머를 모두 정리한다(테스트·정상 종료에 잔여 타이머가 남지 않게). */
+  onModuleDestroy(): void {
+    for (const timer of this.pendingLeaves.values()) clearTimeout(timer);
+    this.pendingLeaves.clear();
+  }
 
   /** 연결 수립 시 자동 실행 — 인증 → socket.data 세팅 → room:state 전송 → 접속자 수 broadcast */
   async handleConnection(client: AppSocket): Promise<void> {
@@ -69,21 +86,13 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.id,
       );
 
-      // 대기 중에만 참가자 슬롯을 비운다. 게임 진행 중(playing/finished)에는 새로고침·일시
-      // 끊김으로 슬롯을 잃으면 입장 잠금(ROOM_LOCKED)에 막혀 다시 못 들어오므로, 슬롯을
-      // 유지해 재접속(reclaim)을 허용한다 — 온라인 카운트만 갱신한다.
+      // 대기 중이라도 슬롯을 곧바로 비우지 않는다. 게임 진행 중(playing/finished)은 원래부터
+      // 슬롯을 유지해 재접속(reclaim)을 허용하는데, 대기 중에는 즉시 제거해서 서버 재시작·
+      // ping timeout·탭 백그라운드로 잠깐 끊긴 참가자까지 튕겨 나갔다. 이제 대기 중에도
+      // 유예를 두고, 유예 안에 같은 닉네임이 재접속하면 제거를 취소한다 — 온라인 카운트만 즉시 갱신한다.
       if (nickname) {
         const status = await this.roomService.getStatus(roomId);
-        if (status === 'waiting') {
-          const { participants, participantCount } =
-            await this.roomService.removeParticipant(roomId, nickname);
-          this.server.to(roomId).emit('participant:left', {
-            nickname,
-            participants,
-            participantCount,
-          });
-          await this.emitReady(roomId);
-        }
+        if (status === 'waiting') this.scheduleLeave(roomId, nickname);
       }
 
       this.server.to(roomId).emit('online:count', { onlineCount });
@@ -109,6 +118,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (nickname === BALLOON.HOST_NAME || nickname === DRAW.UNSELECTED) {
       return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
     }
+
+    // 이 닉네임으로 들어오려는 시도 자체가 '아직 방에 있음'의 신호다 — 대기 중 끊김으로
+    // 잡혀 있던 유예 제거 타이머가 있으면 취소한다(재접속으로 튕겨 나가지 않게).
+    this.clearPendingLeave(roomId, nickname);
 
     // 같은 닉네임으로 다시 눌러도 성공으로 취급(멱등) — 이미 통과한 소켓이라 비밀번호 재검증 생략.
     const previous = client.data.nickname;
@@ -140,19 +153,27 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const add = await this.roomService.addParticipant(roomId, nickname);
     if (add.status === 'full') return this.fail(client, ERROR_CODES.ROOM_FULL);
     if (add.status === 'taken') {
-      // 게임 중에는 신규 입장이 이미 막혀 있어(위 ROOM_LOCKED), 같은 닉네임 요청은
-      // 그 닉네임 주인의 재접속(reclaim)으로 보고 통과시킨다. 대기 중에는 중복 선택
-      // 방지를 위해 그대로 거절한다.
-      if (status !== 'waiting') {
-        client.data.nickname = nickname;
-        this.server.to(roomId).emit('participant:joined', {
-          nickname,
-          participants: add.participants,
-          participantCount: add.participantCount,
-        });
-        return { ok: true };
+      // 이미 players 에 있는 닉네임 요청. 진짜 중복(다른 '살아있는' 소켓이 지금 그 닉네임을 쥐고 있음)
+      // 일 때만 거절한다. 그 외(게임 중 새로고침, 대기 중 끊김 후 재접속, 서버 재시작 후 재접속)는
+      // 슬롯을 그대로 이어받는(reclaim) 정상 흐름이다 — 특히 서버 재시작은 인메모리 유예 맵이 비므로
+      // '살아있는 소켓 유무'로 판정해야 재접속이 튕기지 않는다.
+      const liveDuplicate =
+        status === 'waiting' &&
+        (await this.isNicknameHeldByLiveSocket(roomId, nickname, client.id));
+      if (liveDuplicate) return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+
+      client.data.nickname = nickname;
+      this.server.to(roomId).emit('participant:joined', {
+        nickname,
+        participants: add.participants,
+        participantCount: add.participantCount,
+      });
+      // 대기 중 재접속이면 준비 목록(로비 복귀)도 유지되도록 다시 표시한다(멱등).
+      if (status === 'waiting') {
+        await this.roomService.markReady(roomId, nickname);
+        await this.emitReady(roomId);
       }
-      return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+      return { ok: true };
     }
 
     // 이 소켓이 이미 다른 닉네임으로 입장해 있었다면 옛 슬롯을 비워 유령 참가자를 막는다.
@@ -208,6 +229,8 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   async handleLeave(client: AppSocket): Promise<{ ok: true }> {
     const { roomId, nickname } = client.data;
     if (roomId && nickname) {
+      // 명시적 나가기는 즉시 제거다 — 혹시 걸려 있던 유예 타이머가 나중에 또 돌지 않게 지운다.
+      this.clearPendingLeave(roomId, nickname);
       const { participants, participantCount } =
         await this.roomService.removeParticipant(roomId, nickname);
       client.data.nickname = undefined;
@@ -220,6 +243,80 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { ok: true };
   }
 
+  /**
+   * 대기 중 끊긴 참가자를 유예 시간 뒤에 제거하도록 예약한다.
+   * 같은 (방·닉네임) 예약이 이미 있으면 새로 건다. 유예 안에 재접속하면 handleJoin 이 취소한다.
+   * 서버 재시작 시 타이머는 사라지지만, 그땐 클라이언트가 재접속하며 재-join 하므로 슬롯은 유지된다.
+   */
+  private scheduleLeave(roomId: string, nickname: string): void {
+    const key = `${roomId}:${nickname}`;
+    const existing = this.pendingLeaves.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.pendingLeaves.delete(key);
+      void this.finalizeLeave(roomId, nickname);
+    }, ROOM.WAITING_LEAVE_GRACE_MS);
+    // 이 타이머 하나 때문에 프로세스가 종료를 못 미루도록 한다(테스트·정상 종료에 영향 없게).
+    timer.unref?.();
+    this.pendingLeaves.set(key, timer);
+  }
+
+  /**
+   * 지금 이 방에 '살아있는' 다른 소켓이 그 닉네임을 쥐고 있는지 본다.
+   * 대기 중 중복 닉네임을 판정할 때, players Set 에 남아 있다는 사실만으로는 재접속·서버 재시작 후
+   * 복귀와 진짜 중복을 구분할 수 없어(둘 다 Set 에 있음), 현재 연결된 소켓들의 nickname 으로 판정한다.
+   */
+  private async isNicknameHeldByLiveSocket(
+    roomId: string,
+    nickname: string,
+    excludeSocketId: string,
+  ): Promise<boolean> {
+    const sockets = await this.server.in(roomId).fetchSockets();
+    return sockets.some(
+      (s) =>
+        s.id !== excludeSocketId &&
+        (s.data as AppSocket['data'])?.nickname === nickname,
+    );
+  }
+
+  /** 방 종료 시 그 방에 걸린 모든 유예 제거 타이머를 정리한다. */
+  private clearRoomLeaves(roomId: string): void {
+    const prefix = `${roomId}:`;
+    for (const [key, timer] of this.pendingLeaves) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(timer);
+        this.pendingLeaves.delete(key);
+      }
+    }
+  }
+
+  /** 걸려 있던 유예 제거 타이머를 취소한다(재접속·명시적 나가기·방 종료 시). */
+  private clearPendingLeave(roomId: string, nickname: string): void {
+    const key = `${roomId}:${nickname}`;
+    const timer = this.pendingLeaves.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingLeaves.delete(key);
+    }
+  }
+
+  /** 유예가 다 지나도 재접속이 없었을 때 실제로 참가자를 제거한다(여전히 대기 상태일 때만). */
+  private async finalizeLeave(roomId: string, nickname: string): Promise<void> {
+    try {
+      // 유예 사이 게임이 시작됐다면 슬롯을 유지한다(playing/finished 는 reclaim 대상).
+      const status = await this.roomService.getStatus(roomId);
+      if (status !== 'waiting') return;
+      const { participants, participantCount } =
+        await this.roomService.removeParticipant(roomId, nickname);
+      this.server
+        .to(roomId)
+        .emit('participant:left', { nickname, participants, participantCount });
+      await this.emitReady(roomId);
+    } catch {
+      // 방이 이미 사라졌거나 종료 중이면 무시한다.
+    }
+  }
+
   /** host 방 종료 — Redis 방 키 삭제 후 전원에게 알리고 모두 연결 해제. */
   @SubscribeMessage('room:close')
   async handleClose(
@@ -229,6 +326,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
     if (role !== 'host') return this.fail(client, ERROR_CODES.NOT_HOST);
 
+    this.clearRoomLeaves(roomId); // 방이 사라지므로 남은 유예 타이머도 정리한다.
     await this.roomService.closeRoom(roomId);
     this.server.to(roomId).emit('room:closed', { roomId });
     this.server.in(roomId).disconnectSockets(true);

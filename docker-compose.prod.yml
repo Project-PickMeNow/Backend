@@ -1,25 +1,48 @@
-# 프로덕션 스택 (EC2). deploy.yml 이 이 파일을 ~/app 로 복사하고
+# 프로덕션 스택 (EC2). deploy.yml 이 이 파일과 Caddyfile 을 ~/app 로 복사하고
 #   docker compose -f docker-compose.prod.yml pull && up -d
 # 를 실행한다. 앱 이미지는 CI 가 빌드·푸시한 뒤 .env 의 DOCKER_IMAGE 로 지정한다.
 #
 # 필요한 환경변수는 같은 디렉터리의 .env 에 둔다(.env.prod.example 참고).
-# TLS/wss 는 이후 nginx 를 앞단에 붙여 처리한다(지금은 app 포트를 직접 노출).
+# TLS/wss 는 Caddy 리버스 프록시가 처리한다 — .env 의 DOMAIN 으로 Let's Encrypt 인증서를
+# 자동 발급/갱신하고, wss(WebSocket) 업그레이드도 그대로 프록시한다. 앱은 외부로 직접 노출하지 않고
+# Caddy(80/443)만 공개한다(보안그룹에서 80/443 만 열면 된다).
 services:
+  # ── 리버스 프록시 (HTTPS/wss 종단, 인증서 자동) ──
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      # 백엔드 도메인(예: api.pickmeup.example.com). 이 도메인 A 레코드가 EC2 퍼블릭 IP 를 가리켜야
+      # Caddy 가 Let's Encrypt 인증서를 발급받는다.
+      DOMAIN: ${DOMAIN}
+      # 인증서 만료 알림 이메일(선택). 없어도 발급은 된다.
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 발급받은 인증서·ACME 계정을 영속화한다 — 재시작마다 재발급(레이트리밋)되지 않게 필수.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
   app:
     image: ${DOCKER_IMAGE}
     restart: unless-stopped
     env_file: .env
     environment:
-      # 컨테이너 내부는 항상 3000 으로 고정(아래 포트 매핑과 일치). .env 의 PORT 보다 우선한다.
+      # 컨테이너 내부는 항상 3000 으로 고정. .env 의 PORT 보다 우선한다.
       PORT: 3000
+    # 외부로 포트를 직접 노출하지 않는다 — Caddy 가 compose 내부망에서 app:3000 으로 프록시한다.
+    expose:
+      - '3000'
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      # 호스트 노출 포트는 APP_PORT(기본 3000). nginx 를 붙이면 이 매핑을 내부로 돌린다.
-      - '${APP_PORT:-3000}:3000'
 
   postgres:
     image: postgres:16-alpine
@@ -48,3 +71,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  caddy_data:
+  caddy_config:

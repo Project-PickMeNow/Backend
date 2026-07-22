@@ -556,6 +556,11 @@ export class GameService {
     }
 
     const c = Math.min(DRAW.MAX, Math.max(DRAW.MIN, Math.floor(count)));
+
+    // 제비 수가 참가자 수보다 적으면 게임을 시작하지 않는다(모든 참가자가 1인 1제비를 뽑아야 하므로).
+    const players = await this.redis.client.scard(RedisKeys.roomPlayers(roomId));
+    if (c < players) throw new GameError(ERROR_CODES.NOT_ENOUGH_STICKS);
+
     // 꽝은 최소 1개, 최대 c-1개(전부 꽝이면 뽑을 이유가 없다).
     const b = Math.min(c - 1, Math.max(1, Math.floor(blanks)));
 

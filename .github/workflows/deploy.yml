@@ -68,13 +68,14 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/siheung-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/siheung-backend:${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: EC2에 compose 파일 복사
+      - name: EC2에 compose·Caddy 파일 복사
         uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
-          source: "docker-compose.prod.yml"
+          # Caddy(리버스 프록시)가 Caddyfile 을 읽으므로 compose 와 함께 복사한다.
+          source: "docker-compose.prod.yml,Caddyfile"
           target: "~/app"
 
       - name: EC2 배포

@@ -1,0 +1,20 @@
+# Pick Me Up 백엔드 리버스 프록시 (Caddy)
+#
+# HTTPS/wss 를 자동으로 처리한다:
+#  - {$DOMAIN} 은 docker-compose.prod.yml 이 .env 의 DOMAIN 을 주입한다(예: api.pickmeup.example.com).
+#  - Caddy 가 그 도메인으로 Let's Encrypt 인증서를 자동 발급/갱신한다(80/443 만 열려 있으면 됨).
+#  - reverse_proxy 는 WebSocket(Socket.io) 업그레이드를 그대로 통과시키므로 wss 가 별도 설정 없이 동작한다.
+#
+# 전제: {$DOMAIN} 의 DNS A 레코드가 이 EC2 의 퍼블릭 IP 를 가리키고 있어야 인증서가 발급된다.
+
+{
+	# 인증서 만료 알림 이메일(선택). .env 의 ACME_EMAIL 이 비어 있어도 발급은 된다.
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	# 압축 응답
+	encode zstd gzip
+	# 모든 요청(REST + Socket.io wss)을 앱 컨테이너로 프록시한다.
+	reverse_proxy app:3000
+}

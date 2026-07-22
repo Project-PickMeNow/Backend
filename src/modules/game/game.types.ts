@@ -111,6 +111,7 @@ export interface BalloonState {
   maxPerTurn: number; // 한 턴에 펌프할 수 있는 최대 횟수
   turnOrder: string[]; // 턴 순서(호스트 포함, 시작 시 스냅샷)
   turn: string | null; // 현재 턴(걸린 뒤 null). 호스트 차례면 '호스트'
+  turnDeadline: number | null; // 현재 턴 제한시간(epoch ms). 걸린 뒤엔 null. 전원이 같은 카운트다운을 본다.
   caughtBy: string | null; // 풍선을 터뜨려 걸린 참가자(진행 중이면 null)
 }
 
@@ -120,6 +121,7 @@ export interface BalloonStartedPayload {
   turnOrder: string[]; // 호스트 포함
   turn: string; // 첫 턴
   maxPerTurn: number;
+  turnDeadline: number; // 첫 턴 제한시간(epoch ms)
 }
 
 /** balloon:pumped broadcast — 현재 턴 참가자가 풍선을 한 번 펌프할 때마다(턴은 유지된다). */
@@ -128,6 +130,7 @@ export interface BalloonPumpedPayload {
   pumps: number; // 갱신된 누적 펌프 수
   turnPumps: number; // 갱신된 이번 턴 펌프 수
   turn: string | null; // 유지되는 현재 턴 — 걸렸으면 null
+  turnDeadline: number | null; // 현재 턴의 제한시간(턴이 바뀌면 새 값). 걸렸으면 null.
   caughtBy: string | null; // 이 펌프로 터져 걸렸으면 그 사람, 아니면 null
   burst: boolean; // 이 펌프로 풍선이 터졌는지
 }
@@ -136,7 +139,19 @@ export interface BalloonPumpedPayload {
 export interface BalloonPassedPayload {
   by: string; // 넘긴 사람('호스트' 포함)
   turn: string; // 다음 턴 참가자(넘긴 뒤 그 사람의 turnPumps 는 0)
+  turnDeadline: number; // 새 턴 제한시간(epoch ms)
 }
+
+/**
+ * balloon:timeout(호스트 클라이언트가 60초 만료 시 호출) 처리 결과.
+ * 서버가 자동 펌프/넘기기 중 무엇을 했는지에 따라 재사용할 broadcast 이벤트를 함께 돌려준다
+ * (제비뽑기 autoresolve 가 draw:picked 를 재사용하듯, 프론트는 기존 pumped/passed 핸들러 그대로 반영).
+ * null = 아직 만료 전이거나 게임이 없어 아무것도 안 함(멱등).
+ */
+export type BalloonTimeoutResult =
+  | { event: 'balloon:pumped'; payload: BalloonPumpedPayload }
+  | { event: 'balloon:passed'; payload: BalloonPassedPayload }
+  | null;
 
 /** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */
 export interface VoteTallyEntry {

@@ -412,18 +412,13 @@ export class GameGateway implements OnGatewayDisconnect {
 
   /**
    * host 풍선 게임 시작 — 참가자 순서를 스냅샷하고 폭탄을 무작위로 정한다.
-   * 전원에게 balloon:started(총 개수·턴 순서·첫 턴)를 알린다(폭탄 위치는 비밀).
+   * 전원에게 balloon:started(총 개수·턴 순서·첫 턴·턴 제한시각)를 알린다(폭탄 위치는 비밀).
+   * 총 펌프 수(풍선 크기)는 서버가 인원수로 자동 계산하므로 payload 는 받지 않는다.
    */
   @SubscribeMessage('balloon:start')
-  async handleBalloonStart(
-    client: AppSocket,
-    payload: { total?: number },
-  ): Promise<Ack> {
+  async handleBalloonStart(client: AppSocket): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
-      const res = await this.gameService.startBalloon(
-        roomId,
-        payload?.total ?? 0,
-      );
+      const res = await this.gameService.startBalloon(roomId);
       this.server.to(roomId).emit('balloon:started', res);
     });
   }
@@ -469,6 +464,26 @@ export class GameGateway implements OnGatewayDisconnect {
       if (err instanceof GameError) return this.fail(client, err.code);
       throw err;
     }
+  }
+
+  /**
+   * 턴 60초 만료(host 전용) — 호스트 클라이언트가 카운트다운이 0이 되면 호출한다.
+   * 서버가 자동 펌프(미펌프 시) 후 다음 사람으로 넘기거나, 이미 펌프했으면 그냥 넘긴다.
+   * 결과는 재사용 이벤트(balloon:pumped / balloon:passed)로 전원에게 broadcast 한다. 멱등이라 중복 호출도 안전.
+   */
+  @SubscribeMessage('balloon:timeout')
+  async handleBalloonTimeout(
+    client: AppSocket,
+    payload: { deadline?: number },
+  ): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      // deadline 은 이 턴의 고유 토큰 — 서버 현재 턴과 일치할 때만 처리한다(이미 넘어간 턴이면 무시).
+      const res = await this.gameService.timeoutBalloon(
+        roomId,
+        payload?.deadline ?? 0,
+      );
+      if (res) this.server.to(roomId).emit(res.event, res.payload);
+    });
   }
 
   /**

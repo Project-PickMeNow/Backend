@@ -28,6 +28,8 @@ export interface RoomStatePayload {
   status: string;
   gameType: string | null;
   isSecret: boolean; // 비밀방 여부(참가자 UI 의 자물쇠 표시용). 비밀번호·해시는 절대 포함하지 않는다.
+  startAt: number; // 방 유효기간 시작(epoch ms). 이 시각부터 참가자 입장 가능. 0=즉시(레거시).
+  endAt: number; // 방 유효기간 종료(epoch ms). 이 시각이 지나면 방이 사라진다. 0=미설정(레거시).
   items: Item[];
   participants: string[]; // 닉네임 목록
   participantCount: number;

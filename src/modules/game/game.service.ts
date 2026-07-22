@@ -11,6 +11,7 @@ import {
   BalloonPassedPayload,
   BalloonPumpedPayload,
   BalloonStartedPayload,
+  BalloonTimeoutResult,
   DrawPick,
   DrawShuffledPayload,
   DrawState,
@@ -53,6 +54,7 @@ interface StoredBalloon {
   turnPumps: number; // 이번 턴에 펌프한 수(0..MAX_PER_TURN)
   turnOrder: string[]; // 호스트('호스트') 포함
   turnIndex: number;
+  turnDeadline: number; // 현재 턴 제한시간(epoch ms). 이 시각이 지나면 자동 펌프/넘기기.
   caughtBy: string | null;
 }
 
@@ -723,11 +725,11 @@ export class GameService {
   /**
    * 풍선 게임 시작 — 참가자 순서를 스냅샷하고 터지는 순번을 무작위로 정한다.
    * 진행 중(아직 안 걸림)인 게임이 있으면 새로 시작할 수 없다.
+   *
+   * 총 펌프 수(=풍선 크기)는 호스트가 정하지 않고 서버가 '인원수(호스트 포함) × MAX_PER_TURN × ROUNDS'
+   * (= 인원수 × 3 × 3)로 자동 계산한다 — 인원이 많을수록 판이 커진다.
    */
-  async startBalloon(
-    roomId: string,
-    total: number,
-  ): Promise<BalloonStartedPayload> {
+  async startBalloon(roomId: string): Promise<BalloonStartedPayload> {
     const room = await this.loadRoomOrThrow(roomId);
     if (room.gameType !== 'balloon') {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
@@ -748,10 +750,9 @@ export class GameService {
       throw new GameError(ERROR_CODES.NEED_MORE_PLAYERS);
     }
 
-    const capacity = Math.min(
-      BALLOON.MAX_TOTAL,
-      Math.max(BALLOON.MIN_TOTAL, Math.floor(total) || BALLOON.DEFAULT_TOTAL),
-    );
+    // 총 펌프 = 인원수(호스트 포함) × 턴당 최대 펌프(3) × 라운드(3).
+    const capacity = turnOrder.length * BALLOON.MAX_PER_TURN * BALLOON.ROUNDS;
+    const turnDeadline = this.newTurnDeadline();
     const stored: StoredBalloon = {
       capacity,
       burstAt: randomInt(capacity) + 1, // 비밀 — 1..capacity 째 펌프에 터진다
@@ -759,6 +760,7 @@ export class GameService {
       turnPumps: 0,
       turnOrder,
       turnIndex: 0,
+      turnDeadline,
       caughtBy: null,
     };
     await this.saveBalloon(roomId, stored);
@@ -771,6 +773,7 @@ export class GameService {
       turnOrder,
       turn: turnOrder[0],
       maxPerTurn: BALLOON.MAX_PER_TURN,
+      turnDeadline,
     };
   }
 
@@ -778,10 +781,7 @@ export class GameService {
    * 가운데 풍선 한 번 펌프. 현재 턴 참가자만 가능하다(한 턴에 한 번, 곧바로 다음 사람으로 넘어간다).
    * 누적 펌프가 비밀 순번(burstAt)에 도달하면 풍선이 터져 그 사람이 걸리고 게임이 끝난다.
    */
-  async pumpBalloon(
-    roomId: string,
-    by: string,
-  ): Promise<BalloonPumpedPayload> {
+  async pumpBalloon(roomId: string, by: string): Promise<BalloonPumpedPayload> {
     const s = await this.loadBalloon(roomId);
     if (!s) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 시작 전
     if (s.caughtBy !== null) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 이미 끝남
@@ -812,16 +812,19 @@ export class GameService {
         pumps: s.pumps,
         turnPumps: s.turnPumps,
         turn: null,
+        turnDeadline: null,
         caughtBy: by,
         burst: true,
       };
     }
 
-    // 안 터짐 — 이번 턴에 MAX_PER_TURN 번을 다 채웠으면 자동으로 다음 사람에게 넘긴다.
-    // 아직 여유가 있으면 턴을 유지해, 같은 사람이 더 펌프하거나 '넘기기'로 일찍 넘길 수 있게 한다.
+    // 안 터짐 — 이번 턴에 MAX_PER_TURN 번을 다 채웠으면 자동으로 다음 사람에게 넘긴다(새 제한시간).
+    // 아직 여유가 있으면 턴을 유지해, 같은 사람이 더 펌프하거나 '넘기기'로 일찍 넘길 수 있게 한다
+    // (턴은 유지되므로 제한시간도 그대로 — 한 턴 = 60초 한 번).
     if (s.turnPumps >= BALLOON.MAX_PER_TURN) {
       s.turnIndex = await this.nextTurnIndex(roomId, s);
       s.turnPumps = 0;
+      s.turnDeadline = this.newTurnDeadline();
     }
     await this.saveBalloon(roomId, s);
     await this.rooms.touchRoom(roomId);
@@ -830,6 +833,7 @@ export class GameService {
       pumps: s.pumps,
       turnPumps: s.turnPumps,
       turn: s.turnOrder[s.turnIndex],
+      turnDeadline: s.turnDeadline,
       caughtBy: null,
       burst: false,
     };
@@ -839,10 +843,7 @@ export class GameService {
    * '넘기기' — 현재 턴 참가자가 1번 이상 펌프한 뒤 다음(자리에 있는) 사람에게 턴을 넘긴다.
    * 아직 한 번도 안 펌프했으면 PUMP_FIRST 로 거절한다.
    */
-  async passBalloon(
-    roomId: string,
-    by: string,
-  ): Promise<BalloonPassedPayload> {
+  async passBalloon(roomId: string, by: string): Promise<BalloonPassedPayload> {
     const s = await this.loadBalloon(roomId);
     if (!s) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 시작 전
     if (s.caughtBy !== null) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 이미 끝남
@@ -856,9 +857,100 @@ export class GameService {
 
     s.turnIndex = await this.nextTurnIndex(roomId, s);
     s.turnPumps = 0; // 새 턴 — 이번 턴 펌프 수 초기화
+    s.turnDeadline = this.newTurnDeadline(); // 새 턴 — 제한시간 리셋
     await this.saveBalloon(roomId, s);
     await this.rooms.touchRoom(roomId);
-    return { by, turn: s.turnOrder[s.turnIndex] };
+    return { by, turn: s.turnOrder[s.turnIndex], turnDeadline: s.turnDeadline };
+  }
+
+  /**
+   * 턴 제한시간(60초) 만료 처리 — 호스트 클라이언트가 카운트다운이 0이 되면 호출한다(멱등, 서버 권위).
+   *  - 이번 턴에 한 번도 안 펌프했으면(turnPumps === 0) → 자동으로 1번 펌프한다.
+   *    그 펌프로 터지면 그 사람이 걸리고 끝, 안 터지면 다음 사람으로 넘긴다.
+   *  - 이미 1번 이상 펌프했으면 → 그냥 다음 사람으로 넘긴다.
+   * 이미 넘어간 턴의 늦은·중복 호출은 아무것도 안 하고 null 을 돌려준다(멱등).
+   * 결과는 재사용 이벤트(balloon:pumped / balloon:passed)로 게이트웨이가 broadcast 한다.
+   *
+   * @param deadline 호스트가 만료를 감지한 턴의 제한시각(=클라가 받은 turnDeadline). 이 턴의 고유
+   *   토큰으로 쓴다 — 현재 턴과 값이 다르면(=이미 넘어간 턴) 무시한다. 시계 오차와 무관하게 안전하다.
+   */
+  async timeoutBalloon(
+    roomId: string,
+    deadline: number,
+  ): Promise<BalloonTimeoutResult> {
+    const s = await this.loadBalloon(roomId);
+    if (!s || s.caughtBy !== null) return null; // 시작 전이거나 이미 끝남 — 무시
+    // 턴이 바뀌면 turnDeadline 이 새 값이 되므로, 옛 턴의 늦은·중복 호출은 값이 달라 걸러진다(멱등).
+    if (deadline !== s.turnDeadline) return null;
+
+    const by = s.turnOrder[s.turnIndex];
+
+    // (1) 한 번도 안 펌프한 턴 — 자동으로 1번 펌프한다.
+    if (s.turnPumps === 0) {
+      s.pumps += 1;
+      s.turnPumps += 1;
+      if (s.pumps >= s.burstAt) {
+        // 자동 펌프로 터짐 — 그 사람이 걸리고 게임 종료.
+        s.caughtBy = by;
+        await this.saveBalloon(roomId, s);
+        await this.redis.client.hset(
+          RedisKeys.room(roomId),
+          'status',
+          'finished',
+        );
+        await this.rooms.touchRoom(roomId);
+        return {
+          event: 'balloon:pumped',
+          payload: {
+            by,
+            pumps: s.pumps,
+            turnPumps: s.turnPumps,
+            turn: null,
+            turnDeadline: null,
+            caughtBy: by,
+            burst: true,
+          },
+        };
+      }
+      // 안 터짐 — 자동 펌프 뒤 다음 사람으로 넘긴다(제한시간 만료로 턴 종료).
+      s.turnIndex = await this.nextTurnIndex(roomId, s);
+      s.turnPumps = 0;
+      s.turnDeadline = this.newTurnDeadline();
+      await this.saveBalloon(roomId, s);
+      await this.rooms.touchRoom(roomId);
+      return {
+        event: 'balloon:pumped',
+        payload: {
+          by,
+          pumps: s.pumps,
+          turnPumps: 0,
+          turn: s.turnOrder[s.turnIndex],
+          turnDeadline: s.turnDeadline,
+          caughtBy: null,
+          burst: false,
+        },
+      };
+    }
+
+    // (2) 이미 1번 이상 펌프한 턴 — 그냥 다음 사람으로 넘긴다('넘기기'와 동일).
+    s.turnIndex = await this.nextTurnIndex(roomId, s);
+    s.turnPumps = 0;
+    s.turnDeadline = this.newTurnDeadline();
+    await this.saveBalloon(roomId, s);
+    await this.rooms.touchRoom(roomId);
+    return {
+      event: 'balloon:passed',
+      payload: {
+        by,
+        turn: s.turnOrder[s.turnIndex],
+        turnDeadline: s.turnDeadline,
+      },
+    };
+  }
+
+  /** 지금부터 TURN_MS(60초) 뒤를 새 턴 제한시각(epoch ms)으로. */
+  private newTurnDeadline(): number {
+    return Date.now() + BALLOON.TURN_MS;
   }
 
   /** 배열을 무작위로 섞은 새 배열을 돌려준다(Fisher-Yates, 암호학적 randomInt). 원본은 안 건드린다. */
@@ -929,8 +1021,9 @@ export class GameService {
   }
 
   /**
-   * 결과를 저장한다(게임 실행·투표 마감 공통). 활동이므로 방 TTL 을 리셋하고,
-   * 결과 키도 방과 같은 수명을 줘 방이 사라질 때 함께 없어지게 한다.
+   * 결과를 저장한다(게임 실행·투표 마감 공통). 활동이므로 방 TTL 을 리셋한다.
+   * 결과 키의 수명은 touchRoom 이 다른 방 키들과 함께 맞춰준다(유효기간 방은 종료 시각, 레거시는 3일)
+   * — 방이 사라질 때 결과 키도 함께 없어진다.
    */
   private async saveResult(roomId: string, result: GameResult): Promise<void> {
     await this.redis.client.set(
@@ -938,10 +1031,6 @@ export class GameService {
       JSON.stringify(result),
     );
     await this.rooms.touchRoom(roomId);
-    await this.redis.client.expire(
-      RedisKeys.gameResult(roomId),
-      this.rooms.ttl,
-    );
   }
 
   private parseItems(raw: string | undefined): Item[] {

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomBytes, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { RedisService } from '../../infra/redis/redis.service';
 import { StatsService } from '../stats/stats.service';
 import { CreateRoomDto, CreateRoomResponse } from './dto/create-room.dto';
@@ -61,12 +61,23 @@ export class RoomService {
     return Number.isNaN(parsed) ? ROOM_CAPACITY.DEFAULT : parsed;
   }
 
+  /** 입장 비밀번호(숫자 PIN)를 저장·비교용 해시로. 평문은 어디에도 남기지 않는다. */
+  private hashPassword(password: string): string {
+    return createHash('sha256').update(password).digest('hex');
+  }
+
   /** 방 생성 (POST /api/rooms) → Redis 저장 + stats.total_rooms +1 */
   async createRoom(dto: CreateRoomDto): Promise<CreateRoomResponse> {
     const roomId = await this.generateUniqueRoomId();
     // host 임을 증명하는 비밀값. 방 종료·항목 변경 등 host 전용 액션에서 검증한다.
     const hostToken = randomBytes(24).toString('base64url');
     const key = RedisKeys.room(roomId);
+
+    // 비밀방: isSecret 이 true 이고 비밀번호가 있을 때만 성립. 평문 PIN 은 저장하지 않고 해시만 둔다.
+    const isSecret = dto.isSecret === true && !!dto.password;
+    const joinCodeHash = isSecret
+      ? this.hashPassword(dto.password as string)
+      : '';
 
     // hset 과 expire 를 한 번에 보내, TTL 이 안 걸린 방이 남는 창을 없앤다.
     await this.redis.client
@@ -78,6 +89,8 @@ export class RoomService {
         gameType: dto.gameType ?? '', // Redis Hash 에 null 을 넣을 수 없어 빈 문자열로 둔다
         items: '[]',
         maxParticipants: String(this.clampCapacity(dto.maxParticipants)),
+        isSecret: isSecret ? '1' : '0',
+        joinCodeHash, // 해시(또는 자유방이면 빈 문자열) — 절대 응답으로 내보내지 않는다
         createdAt: new Date().toISOString(),
       })
       .expire(key, this.ttlSeconds)
@@ -114,7 +127,8 @@ export class RoomService {
       RedisKeys.roomPlayers(roomId),
     );
 
-    // hostToken 은 절대 내보내지 않는다 — 이 응답은 참가자도 받는다.
+    // hostToken·joinCodeHash 는 절대 내보내지 않는다 — 이 응답은 참가자도 받는다.
+    // isSecret 만 알려, 참가자 입장 화면이 비밀번호 입력칸을 띄울지 정한다.
     return {
       roomId,
       title: room.title,
@@ -122,7 +136,26 @@ export class RoomService {
       gameType: room.gameType || null,
       participantCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
+      isSecret: room.isSecret === '1',
     };
+  }
+
+  /**
+   * 비밀방 입장 비밀번호 검증. 자유방(비밀번호 없음)은 항상 통과.
+   * 비밀방인데 비밀번호가 없거나 해시가 다르면 false. 평문 비교 없이 해시로만 대조한다.
+   */
+  async verifyJoinPassword(
+    roomId: string,
+    password: string | undefined,
+  ): Promise<boolean> {
+    const [isSecret, storedHash] = await this.redis.client.hmget(
+      RedisKeys.room(roomId),
+      'isSecret',
+      'joinCodeHash',
+    );
+    if (isSecret !== '1') return true; // 자유방
+    if (!password || !storedHash) return false;
+    return this.hashPassword(password) === storedHash;
   }
 
   /** hgetall 로 읽은 문자열 정원을 숫자로(없거나 깨지면 기본값). */
@@ -203,6 +236,7 @@ export class RoomService {
       title: room.title ?? '',
       status: room.status ?? 'waiting',
       gameType: room.gameType || null,
+      isSecret: room.isSecret === '1',
       items: this.parseItems(room.items),
       participants,
       participantCount: participants.length,

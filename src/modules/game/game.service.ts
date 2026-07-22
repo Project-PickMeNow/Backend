@@ -479,12 +479,9 @@ export class GameService {
     // 꽝은 최소 1개, 최대 c-1개(전부 꽝이면 뽑을 이유가 없다).
     const b = Math.min(c - 1, Math.max(1, Math.floor(blanks)));
 
-    // 1인당 뽑기 상한 — 제비수(c)가 참가자수(people)보다 많으면 참가자도 복수개를 뽑을 수 있게
-    // 상한을 올린다. perPick = ceil(제비수 / 사람수). 제비수 ≤ 사람수면 1(1인 1제비)로 수렴한다.
-    // 사람수는 섞는 시점의 참가자 수로 고정한다(이후 입퇴장에도 라운드 규칙이 흔들리지 않게).
-    // 호스트는 이 상한과 무관하게 여러 개 뽑을 수 있다.
-    const people = await this.redis.client.scard(RedisKeys.roomPlayers(roomId));
-    const perPick = Math.max(1, Math.ceil(c / Math.max(1, people)));
+    // 참가자는 제비 수와 무관하게 1인 1제비만 뽑는다. 호스트(어드민)만 이 상한과 무관하게 여러 개를
+    // 뽑을 수 있고, 호스트의 2번째부터는 '미선택' 으로 공개된다(pickDraw 참고).
+    const perPick = DRAW.PER_PICK;
 
     // [0..c-1] 을 섞어 앞의 b개를 꽝 위치로.
     const order = Array.from({ length: c }, (_, i) => i);
@@ -543,7 +540,7 @@ export class GameService {
 
     const picksKey = RedisKeys.gameDrawPicks(roomId);
 
-    // 참가자는 1인 perPick 제비 — 잠그기 전에 먼저 확인(정상 경로 차단).
+    // 참가자는 1인 perPick(=1) 제비 — 잠그기 전에 먼저 확인(정상 경로 차단).
     if (!isHost) {
       const already = await this.redis.client.hvals(picksKey);
       if (already.filter((v) => v === by).length >= perPick) {
@@ -551,11 +548,26 @@ export class GameService {
       }
     }
 
+    // 뽑은 사람 이름 확정.
+    //  - 참가자: 자기 닉네임.
+    //  - 호스트: 첫 제비는 '호스트', 2번째부터는 '미선택'(아무도 고르지 않은 제비를 어드민이 대신 공개).
+    let effectiveBy = by;
+    if (isHost) {
+      const vals = await this.redis.client.hvals(picksKey);
+      effectiveBy = vals.includes(DRAW.HOST_NAME)
+        ? DRAW.UNSELECTED
+        : DRAW.HOST_NAME;
+    }
+
     // 먼저 뽑은 사람이 잠근다(원자적). 이미 있으면 0.
-    const locked = await this.redis.client.hsetnx(picksKey, String(index), by);
+    const locked = await this.redis.client.hsetnx(
+      picksKey,
+      String(index),
+      effectiveBy,
+    );
     if (locked === 0) throw new GameError(ERROR_CODES.GAME_RUNNING); // 이미 뽑힌 제비
 
-    // 잠근 뒤 재확인 — 동시 뽑기 레이스로 상한을 넘겼으면 방금 것을 되돌린다.
+    // 잠근 뒤 재확인 — 동시 뽑기 레이스로 상한을 넘겼으면 방금 것을 되돌린다(참가자만 상한이 있다).
     if (!isHost) {
       const vals = await this.redis.client.hvals(picksKey);
       if (vals.filter((v) => v === by).length > perPick) {
@@ -565,7 +577,7 @@ export class GameService {
     }
 
     await this.rooms.touchRoom(roomId);
-    return { index, by, blank: round.blankSet.includes(index) };
+    return { index, by: effectiveBy, blank: round.blankSet.includes(index) };
   }
 
   /** room:state 복원용 — 섞기 전이면 null, 진행 중이면 개수·꽝수·이미 뽑힌 제비들. */
@@ -592,6 +604,37 @@ export class GameService {
       perPick: round.perPick ?? 1,
       picks,
     };
+  }
+
+  /**
+   * 60초 자동 공개 — 아직 안 뽑힌 제비를 전부 '미선택' 으로 공개한다(호스트 클라이언트가 타이머 만료 시 호출).
+   * HSETNX 라 이미 뽑힌 제비는 건드리지 않고, 이번에 새로 공개된 제비만 반환한다(멱등 — 두 번 불러도 안전).
+   */
+  async autoResolveDraw(roomId: string): Promise<DrawPick[]> {
+    const raw = await this.redis.client.get(RedisKeys.gameDraw(roomId));
+    if (!raw) return []; // 아직 섞기 전이거나 라운드 없음
+    const round = JSON.parse(raw) as {
+      count: number;
+      blankSet: number[];
+    };
+    const picksKey = RedisKeys.gameDrawPicks(roomId);
+    const newly: DrawPick[] = [];
+    for (let index = 0; index < round.count; index++) {
+      const locked = await this.redis.client.hsetnx(
+        picksKey,
+        String(index),
+        DRAW.UNSELECTED,
+      );
+      if (locked === 1) {
+        newly.push({
+          index,
+          by: DRAW.UNSELECTED,
+          blank: round.blankSet.includes(index),
+        });
+      }
+    }
+    if (newly.length > 0) await this.rooms.touchRoom(roomId);
+    return newly;
   }
 
   // ── 풍선 터뜨리기 (러시안 룰렛식, 턴제) ─────────────────────

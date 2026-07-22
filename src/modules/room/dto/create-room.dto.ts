@@ -1,11 +1,15 @@
 import {
+  IsBoolean,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { GAME_TYPES } from '../../../common/constants/game-type';
 import type { GameType } from '../../../common/constants/game-type';
@@ -36,6 +40,23 @@ export class CreateRoomDto {
     message: `정원은 최대 ${ROOM_CAPACITY.MAX}명입니다.`,
   })
   maxParticipants?: number;
+
+  /** 비밀방 여부. true 면 참가자는 입장 시 password 를 맞춰야 한다. */
+  @IsOptional()
+  @IsBoolean({ message: 'isSecret 은 boolean 이어야 합니다.' })
+  isSecret?: boolean;
+
+  /**
+   * 비밀방 입장 비밀번호(숫자 최대 6자리). isSecret 이 true 일 때만 검증한다.
+   * 서버는 이 값을 평문으로 저장하지 않는다(해시만 저장) — 응답에도 절대 내보내지 않는다.
+   */
+  @ValidateIf((o: CreateRoomDto) => o.isSecret === true)
+  @IsString({ message: '비밀번호는 문자열이어야 합니다.' })
+  @IsNotEmpty({ message: '비밀방은 비밀번호가 필요합니다.' })
+  @Matches(/^[0-9]{1,6}$/, {
+    message: '비밀번호는 숫자 최대 6자리여야 합니다.',
+  })
+  password?: string;
 }
 
 /** POST /api/rooms 응답 data (응답 형태라 interface로 충분) */

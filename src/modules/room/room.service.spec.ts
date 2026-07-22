@@ -14,6 +14,7 @@ describe('RoomService', () => {
   const createMultiMock = () => ({
     hset: jest.fn().mockReturnThis(),
     expire: jest.fn().mockReturnThis(),
+    pexpireat: jest.fn().mockReturnThis(),
     exec: jest.fn().mockResolvedValue([]),
   });
 
@@ -86,12 +87,16 @@ describe('RoomService', () => {
       expect(a.hostToken.length).toBeGreaterThanOrEqual(32);
     });
 
-    it('TTL 없는 방이 남지 않도록 hset 과 expire 를 같은 multi 에 실어 보낸다', async () => {
+    it('만료 없는 방이 남지 않도록 hset 과 pexpireat(절대 종료시각)을 같은 multi 에 실어 보낸다', async () => {
       await service.createRoom({ title: '점심' });
 
       expect(clientMock.multi).toHaveBeenCalledTimes(1);
       expect(multiMock.hset).toHaveBeenCalledTimes(1);
-      expect(multiMock.expire).toHaveBeenCalledWith(expect.any(String), 259200);
+      // 유효기간(종료 시각)에 방이 자동 삭제되도록 상대 TTL(expire) 대신 절대 만료(pexpireat)로 건다.
+      expect(multiMock.pexpireat).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Number),
+      );
       expect(multiMock.exec).toHaveBeenCalledTimes(1);
     });
 
@@ -247,6 +252,9 @@ describe('RoomService', () => {
         participantCount: 3,
         maxParticipants: 50,
         isSecret: false,
+        // 유효기간(epoch ms) — 저장 안 된(레거시) 방은 0 으로 응답한다.
+        startAt: 0,
+        endAt: 0,
       });
     });
 
@@ -299,8 +307,8 @@ describe('RoomService', () => {
       expect(res.status).toBe('added');
       expect(res.participantCount).toBe(2);
       expect(stats.incrementParticipants).toHaveBeenCalledTimes(1);
-      // touchRoom 이 multi().expire(...).exec() 로 TTL 을 리셋한다.
-      expect(multiMock.expire).toHaveBeenCalled();
+      // touchRoom 이 multi().pexpireat(...).exec() 로 방 만료(종료 시각)를 다시 건다.
+      expect(multiMock.pexpireat).toHaveBeenCalled();
       expect(multiMock.exec).toHaveBeenCalled();
     });
 

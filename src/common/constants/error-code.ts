@@ -13,6 +13,7 @@ export const ERROR_CODES = {
   PUMP_LIMIT: 'PUMP_LIMIT', // 풍선 — 이번 턴 펌프 상한(MAX_PER_TURN) 도달, 더 못 펌프
   PUMP_FIRST: 'PUMP_FIRST', // 풍선 — 1번도 안 펌프하고 넘기기 시도
   ROOM_LOCKED: 'ROOM_LOCKED', // 게임 진행 중이라 신규 입장 불가
+  WRONG_PASSWORD: 'WRONG_PASSWORD', // 비밀방 — 입장 비밀번호가 없거나 틀림
   PLAYERS_NOT_READY: 'PLAYERS_NOT_READY', // 이전 게임 참가자가 아직 방으로 다 안 돌아옴(새 게임 시작 불가)
   VALIDATION_ERROR: 'VALIDATION_ERROR', // 필드 누락·형식 오류
 } as const;

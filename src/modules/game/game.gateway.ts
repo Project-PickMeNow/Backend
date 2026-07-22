@@ -21,8 +21,8 @@ type Ack = { ok: true } | { ok: false; code: string };
  *  item:add / item:remove / item:reorder — 항목
  *  game:select / game:begin / game:start / room:return — 게임 진행
  *  vote:cast / vote:close — 투표
- *  ladder:build / ladder:reveal / ladder:result — 사다리
- *  draw:shuffle / draw:pick — 제비뽑기
+ *  ladder:build / ladder:reveal / ladder:result / ladder:draft — 사다리
+ *  draw:shuffle / draw:pick / draw:autoresolve / draw:draft — 제비뽑기
  *  roulette:draft — 원판 실시간 편집 미리보기
  */
 @WebSocketGateway({ namespace: '/rooms', cors: true })
@@ -131,16 +131,20 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
-   * host '방으로 돌아가기' — 라운드를 접어(결과·투표·사다리·제비 데이터 삭제) 방을 다시
-   * 대기 상태로 되돌린다. 이때 참가자를 강제로 이동시키지 않는다 — 참가자는 각자 결과창의
-   * '방으로 돌아가기'를 눌러 로비로 오고(1분 내 안 오면 클라이언트가 강퇴 안내), 서버는
-   * 상태만 waiting 으로 바꿔 이후 게임종류 재선택·재시작·신규 입장이 다시 열리게 한다.
+   * host '방으로 돌아가기'(게임 취소) — 라운드를 접어(결과·투표·사다리·제비 데이터 삭제) 방을
+   * 다시 대기 상태로 되돌리고, game:cancelled 로 방 안의 참가자 전원을 로비로 함께 끌어온다.
+   * (참가자는 game:cancelled 를 받아 로비 복귀 안내를 띄우고 room:ready 로 복귀를 표시한다.)
+   * 이후 게임종류 재선택·재시작·신규 입장이 다시 열린다.
    * room 이벤트지만 GameService.resetGame 재사용을 위해 여기 둔다(RoomModule↔GameModule 순환 의존 회피).
    */
   @SubscribeMessage('room:return')
   async handleRoomReturn(client: AppSocket): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
       await this.gameService.resetGame(roomId);
+      // 호스트가 게임을 취소하고 로비로 돌아감 — 방 안의 참가자 전원을 로비로 끌어온다.
+      // 발신자(호스트)는 스스로 이미 로비로 돌아가므로 제외하고 참가자에게만 알린다.
+      // 참가자는 game:cancelled 수신 시 로비 복귀 안내를 띄우고 room:ready 로 복귀를 표시한다.
+      client.broadcast.to(roomId).emit('game:cancelled');
     });
   }
 
@@ -158,6 +162,29 @@ export class GameGateway implements OnGatewayDisconnect {
         ? payload.labels.filter((l): l is string => typeof l === 'string')
         : [];
       client.broadcast.to(roomId).emit('roulette:draft', { labels });
+      return Promise.resolve();
+    });
+  }
+
+  /**
+   * 사다리 편집 실시간 미리보기 — 저장하지 않는 relay. 호스트가 목록(상단 이름·하단 당첨항목)을
+   * 정하는 동안 참가자도 같은 목록을 실시간으로 본다('사다리 시작'을 눌러야 ladder:build 로 확정).
+   * roulette:draft 와 같은 패턴 — 발신자(호스트) 제외하고 방 전원에게 relay.
+   */
+  @SubscribeMessage('ladder:draft')
+  async handleLadderDraft(
+    client: AppSocket,
+    payload: { topLabels?: string[]; bottomLabels?: string[] },
+  ): Promise<Ack> {
+    return this.hostAction(client, (roomId) => {
+      const clean = (a: unknown): string[] =>
+        Array.isArray(a)
+          ? a.filter((l): l is string => typeof l === 'string')
+          : [];
+      client.broadcast.to(roomId).emit('ladder:draft', {
+        topLabels: clean(payload?.topLabels),
+        bottomLabels: clean(payload?.bottomLabels),
+      });
       return Promise.resolve();
     });
   }
@@ -293,6 +320,43 @@ export class GameGateway implements OnGatewayDisconnect {
       if (err instanceof GameError) return this.fail(client, err.code);
       throw err;
     }
+  }
+
+  /**
+   * 제비뽑기 60초 자동 공개(host 전용) — 라운드 시작 60초 뒤 호스트 클라이언트가 호출한다.
+   * 아직 안 뽑힌 제비를 전부 '미선택' 으로 공개하고, 새로 공개된 제비마다 draw:picked 로 broadcast 한다
+   * (기존 뽑기와 같은 이벤트를 재사용 — 클라이언트는 추가 처리 없이 그대로 반영). 멱등이라 중복 호출도 안전.
+   */
+  @SubscribeMessage('draw:autoresolve')
+  async handleDrawAutoResolve(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const picks = await this.gameService.autoResolveDraw(roomId);
+      for (const p of picks) {
+        this.server.to(roomId).emit('draw:picked', p);
+      }
+    });
+  }
+
+  /**
+   * 제비뽑기 설정 실시간 미리보기 — 저장하지 않는 relay. 호스트가 제비 수·꽝 개수를 정하는 동안
+   * 참가자도 같은 설정(제비 판 미리보기)을 실시간으로 본다('제비 섞기'를 눌러야 draw:shuffle 로 확정).
+   * roulette:draft / ladder:draft 와 같은 패턴 — 발신자(호스트) 제외하고 방 전원에게 relay.
+   */
+  @SubscribeMessage('draw:draft')
+  async handleDrawDraft(
+    client: AppSocket,
+    payload: { count?: number; blanks?: number },
+  ): Promise<Ack> {
+    return this.hostAction(client, (roomId) => {
+      const count = Number.isFinite(payload?.count)
+        ? Number(payload?.count)
+        : 0;
+      const blanks = Number.isFinite(payload?.blanks)
+        ? Number(payload?.blanks)
+        : 0;
+      client.broadcast.to(roomId).emit('draw:draft', { count, blanks });
+      return Promise.resolve();
+    });
   }
 
   /**

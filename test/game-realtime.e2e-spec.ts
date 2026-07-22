@@ -189,6 +189,90 @@ describe('GameGateway 게임 관통 (e2e)', () => {
   });
 
   /** 항목 3개 추가 + gameType 선택까지 끝낸 뒤 roomId·host·guest 를 돌려주는 헬퍼 */
+  describe('비밀방 입장 규칙', () => {
+    const createSecretRoom = async (password: string) => {
+      const res = await request(app.getHttpServer())
+        .post('/api/rooms')
+        .send({
+          title: '비밀방',
+          gameType: 'roulette',
+          isSecret: true,
+          password,
+        })
+        .expect(201);
+      return (res.body as { data: { roomId: string; hostToken: string } }).data;
+    };
+
+    it('GET /api/rooms/:id 는 isSecret 을 알리되 비밀번호는 감춘다', async () => {
+      const { roomId } = await createSecretRoom('4242');
+      const res = await request(app.getHttpServer())
+        .get(`/api/rooms/${roomId}`)
+        .expect(200);
+      const body = res.body as { data: Record<string, unknown> };
+      expect(body.data.isSecret).toBe(true);
+      expect(JSON.stringify(body)).not.toContain('4242');
+      expect(body.data).not.toHaveProperty('joinCodeHash');
+    });
+
+    it('틀린 비밀번호로는 입장할 수 없다 (WRONG_PASSWORD)', async () => {
+      const { roomId } = await createSecretRoom('4242');
+      const guest = connect(roomId);
+      try {
+        await once(guest, 'room:state');
+        const ack = (await guest.emitWithAck('room:join', {
+          nickname: 'A',
+          password: '0000',
+        })) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'WRONG_PASSWORD' });
+      } finally {
+        guest.disconnect();
+      }
+    });
+
+    it('비밀번호 없이 비밀방에 입장하면 거절된다 (WRONG_PASSWORD)', async () => {
+      const { roomId } = await createSecretRoom('4242');
+      const guest = connect(roomId);
+      try {
+        await once(guest, 'room:state');
+        const ack = (await guest.emitWithAck('room:join', {
+          nickname: 'A',
+        })) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'WRONG_PASSWORD' });
+      } finally {
+        guest.disconnect();
+      }
+    });
+
+    it('올바른 비밀번호로는 입장할 수 있다', async () => {
+      const { roomId } = await createSecretRoom('4242');
+      const guest = connect(roomId);
+      try {
+        await once(guest, 'room:state');
+        const ack = (await guest.emitWithAck('room:join', {
+          nickname: 'A',
+          password: '4242',
+        })) as Ack;
+        expect(ack).toEqual({ ok: true });
+      } finally {
+        guest.disconnect();
+      }
+    });
+
+    it('자유방은 비밀번호 없이 입장된다', async () => {
+      const { roomId } = await createRoom();
+      const guest = connect(roomId);
+      try {
+        await once(guest, 'room:state');
+        const ack = (await guest.emitWithAck('room:join', {
+          nickname: 'A',
+        })) as Ack;
+        expect(ack).toEqual({ ok: true });
+      } finally {
+        guest.disconnect();
+      }
+    });
+  });
+
   const setupGame = async (gameType: string) => {
     const { roomId, host, guest } = await setup();
     await host.emitWithAck('item:add', { label: '짜장' });
@@ -242,13 +326,12 @@ describe('GameGateway 게임 관통 (e2e)', () => {
     }
   });
 
-  // ── 제비뽑기(인터랙티브) 규칙: 1인당 상한(제비수/사람수)·host 제외 · 다 뽑아야 재섞기 ──
+  // ── 제비뽑기(인터랙티브) 규칙: 참가자 1개·host 복수(2번째+ '미선택')·60초 자동 공개 ──
   describe('제비뽑기(인터랙티브) 규칙', () => {
-    it('제비수 ≤ 사람수면 1인 1제비 — 두 번째 뽑기는 거절 (ALREADY_PICKED)', async () => {
+    it('참가자는 제비 1개만 — 두 번째 뽑기는 거절 (ALREADY_PICKED)', async () => {
       const { roomId, host, guest } = await setupGame('draw');
       const p2 = connect(roomId);
       try {
-        // 참가자 2명 · 제비 2개 → perPick = ceil(2/2) = 1 (1인 1제비).
         await guest.emitWithAck('room:join', { nickname: 'A' });
         await p2.emitWithAck('room:join', { nickname: 'B' });
         const shuffled = once<{ perPick: number }>(guest, 'draw:shuffled');
@@ -266,42 +349,84 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       }
     });
 
-    it('제비수 > 사람수면 참가자도 여러 개 뽑을 수 있다 (perPick = ceil(제비수/사람수))', async () => {
+    it('참가자는 제비수가 사람수보다 많아도 1개만 뽑는다 (perPick 항상 1)', async () => {
       const { host, guest } = await setupGame('draw');
       try {
-        // 참가자 1명 · 제비 4개 → perPick = ceil(4/1) = 4. 혼자 4개 다 뽑을 수 있다.
+        // 참가자 1명 · 제비 4개여도 참가자는 1개만.
         await guest.emitWithAck('room:join', { nickname: '혼자' });
         const shuffled = once<{ perPick: number }>(guest, 'draw:shuffled');
         await host.emitWithAck('draw:shuffle', { count: 4, blanks: 1 });
-        expect((await shuffled).perPick).toBe(4);
+        expect((await shuffled).perPick).toBe(1);
 
-        for (let i = 0; i < 4; i++) {
-          const ack = (await guest.emitWithAck('draw:pick', {
-            index: i,
-          })) as Ack;
-          expect(ack).toEqual({ ok: true });
-        }
+        expect(await guest.emitWithAck('draw:pick', { index: 0 })).toEqual({
+          ok: true,
+        });
+        const second = (await guest.emitWithAck('draw:pick', {
+          index: 1,
+        })) as Ack;
+        expect(second).toEqual({ ok: false, code: 'ALREADY_PICKED' });
       } finally {
         host.disconnect();
         guest.disconnect();
       }
     });
 
-    it('호스트는 여러 제비를 뽑을 수 있다', async () => {
+    it('호스트의 첫 제비는 "호스트", 2번째부터는 "미선택" 으로 공개된다', async () => {
       const { host, guest } = await setupGame('draw');
       try {
         const shuffled = once(host, 'draw:shuffled');
         await host.emitWithAck('draw:shuffle', { count: 4, blanks: 1 });
         await shuffled;
+
+        const first = once<{ by: string }>(guest, 'draw:picked');
         expect(await host.emitWithAck('draw:pick', { index: 0 })).toEqual({
           ok: true,
         });
+        expect((await first).by).toBe('호스트');
+
+        const second = once<{ by: string }>(guest, 'draw:picked');
         expect(await host.emitWithAck('draw:pick', { index: 1 })).toEqual({
           ok: true,
         });
+        expect((await second).by).toBe('미선택');
       } finally {
         host.disconnect();
         guest.disconnect();
+      }
+    });
+
+    it('draw:autoresolve 는 안 뽑힌 제비를 전부 "미선택" 으로 공개한다(host 전용)', async () => {
+      const { roomId, host, guest } = await setupGame('draw');
+      const p2 = connect(roomId);
+      try {
+        await guest.emitWithAck('room:join', { nickname: 'A' });
+        await p2.emitWithAck('room:join', { nickname: 'B' });
+        const shuffled = once(guest, 'draw:shuffled');
+        await host.emitWithAck('draw:shuffle', { count: 4, blanks: 1 });
+        await shuffled;
+
+        // A 가 1개 뽑음 → 남은 3개는 자동 공개 대상.
+        await guest.emitWithAck('draw:pick', { index: 0 });
+
+        // 참가자는 자동 공개를 부를 수 없다.
+        const bad = (await guest.emitWithAck('draw:autoresolve')) as Ack;
+        expect(bad).toEqual({ ok: false, code: 'NOT_HOST' });
+
+        // 호스트가 자동 공개 → 남은 3개가 '미선택' 으로 broadcast.
+        const seen: { index: number; by: string }[] = [];
+        p2.on('draw:picked', (p: { index: number; by: string }) =>
+          seen.push(p),
+        );
+        expect(await host.emitWithAck('draw:autoresolve')).toEqual({
+          ok: true,
+        });
+        await new Promise((r) => setTimeout(r, 80));
+        const auto = seen.filter((p) => p.by === '미선택');
+        expect(auto).toHaveLength(3);
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+        p2.disconnect();
       }
     });
 
@@ -471,7 +596,11 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       try {
         await guest.emitWithAck('room:join', { nickname: 'A' });
         await p2.emitWithAck('room:join', { nickname: 'B' });
-        const sock: Record<string, typeof host> = { 호스트: host, A: guest, B: p2 };
+        const sock: Record<string, typeof host> = {
+          호스트: host,
+          A: guest,
+          B: p2,
+        };
         const started = once<Started>(host, 'balloon:started');
         await host.emitWithAck('balloon:start', { total: 30 });
         const s = await started; // 순서는 무작위 — 첫 턴은 turnOrder[0]

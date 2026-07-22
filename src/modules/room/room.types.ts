@@ -26,6 +26,7 @@ export interface RoomStatePayload {
   title: string;
   status: string;
   gameType: string | null;
+  isSecret: boolean; // 비밀방 여부(참가자 UI 의 자물쇠 표시용). 비밀번호·해시는 절대 포함하지 않는다.
   items: Item[];
   participants: string[]; // 닉네임 목록
   participantCount: number;

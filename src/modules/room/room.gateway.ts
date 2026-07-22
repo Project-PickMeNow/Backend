@@ -9,6 +9,7 @@ import { Server } from 'socket.io';
 import { RoomService } from './room.service';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { BALLOON } from '../../common/constants/balloon';
+import { DRAW } from '../../common/constants/draw';
 import type { AppSocket } from '../../common/types/socket';
 
 /**
@@ -95,7 +96,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('room:join')
   async handleJoin(
     client: AppSocket,
-    payload: { nickname?: string },
+    payload: { nickname?: string; password?: string },
   ): Promise<{ ok: true } | { ok: false; code: string }> {
     const { roomId } = client.data;
     const nickname = payload?.nickname?.trim();
@@ -104,13 +105,24 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
     // '호스트'는 호스트를 나타내는 예약어(제비뽑기·풍선 턴 순서)라 참가자 닉네임으로 쓸 수 없다.
     // (풍선 턴 순서에 호스트가 '호스트'로 포함되므로 같은 이름의 참가자가 있으면 턴 판정이 꼬인다.)
-    if (nickname === BALLOON.HOST_NAME) {
+    // 예약어 방어: '호스트'(턴 순서)·'미선택'(제비뽑기 자동 공개 표기)은 참가자 닉네임으로 쓸 수 없다.
+    if (nickname === BALLOON.HOST_NAME || nickname === DRAW.UNSELECTED) {
       return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
     }
 
-    // 같은 닉네임으로 다시 눌러도 성공으로 취급(멱등).
+    // 같은 닉네임으로 다시 눌러도 성공으로 취급(멱등) — 이미 통과한 소켓이라 비밀번호 재검증 생략.
     const previous = client.data.nickname;
     if (previous === nickname) return { ok: true };
+
+    // 비밀방이면 입장 비밀번호를 먼저 검증한다(자유방은 항상 통과). 호스트는 hostToken 으로
+    // 이미 이 방의 주인임이 확인됐으므로(handleConnection) 비밀번호를 요구하지 않는다.
+    if (client.data.role !== 'host') {
+      const ok = await this.roomService.verifyJoinPassword(
+        roomId,
+        payload?.password,
+      );
+      if (!ok) return this.fail(client, ERROR_CODES.WRONG_PASSWORD);
+    }
 
     // 게임 진행 중(대기 상태가 아님)에는 신규 참가자 입장을 막는다.
     // 단, 이미 이 방의 멤버였던 사람(새로고침·재접속)은 그대로 다시 들어올 수 있어야 한다.

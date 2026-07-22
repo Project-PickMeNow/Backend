@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'node:crypto';
 import { RoomService } from './room.service';
 import { RedisService } from '../../infra/redis/redis.service';
 import { StatsService } from '../stats/stats.service';
@@ -21,6 +22,7 @@ describe('RoomService', () => {
     multi: jest.Mock;
     exists: jest.Mock;
     hget: jest.Mock;
+    hmget: jest.Mock;
     hgetall: jest.Mock;
     scard: jest.Mock;
     sismember: jest.Mock;
@@ -36,6 +38,7 @@ describe('RoomService', () => {
       multi: jest.fn(() => multiMock),
       exists: jest.fn().mockResolvedValue(0), // 기본: 충돌 없음
       hget: jest.fn().mockResolvedValue('3'), // 정원(getRoomCapacity) — 테스트 편의상 3
+      hmget: jest.fn().mockResolvedValue(['0', '']), // 기본: 자유방(isSecret='0')
       hgetall: jest.fn(),
       scard: jest.fn().mockResolvedValue(0),
       sismember: jest.fn().mockResolvedValue(0), // 기본: 새 참가자
@@ -147,6 +150,69 @@ describe('RoomService', () => {
       expect(clientMock.exists).toHaveBeenCalledTimes(2);
       expect(result.roomId).toHaveLength(6);
     });
+
+    it('자유방(기본)은 isSecret=0 · 빈 해시로 저장한다', async () => {
+      await service.createRoom({});
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.isSecret).toBe('0');
+      expect(hash.joinCodeHash).toBe('');
+    });
+
+    it('비밀방은 isSecret=1 로, 비밀번호는 평문이 아닌 해시로만 저장한다', async () => {
+      await service.createRoom({ isSecret: true, password: '1234' });
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.isSecret).toBe('1');
+      expect(hash.joinCodeHash).toHaveLength(64); // sha256 hex
+      expect(hash.joinCodeHash).not.toContain('1234'); // 평문 미포함
+    });
+
+    it('isSecret=true 여도 비밀번호가 없으면 자유방으로 처리한다(해시 없음)', async () => {
+      await service.createRoom({ isSecret: true });
+      const [, hash] = multiMock.hset.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(hash.isSecret).toBe('0');
+      expect(hash.joinCodeHash).toBe('');
+    });
+  });
+
+  describe('verifyJoinPassword', () => {
+    it('자유방(isSecret=0)은 비밀번호 없이도 통과한다', async () => {
+      clientMock.hmget.mockResolvedValue(['0', '']);
+      await expect(
+        service.verifyJoinPassword('ABC123', undefined),
+      ).resolves.toBe(true);
+    });
+
+    it('비밀방에서 올바른 비밀번호는 통과한다(해시 일치)', async () => {
+      const hash = createHash('sha256').update('4242').digest('hex');
+      clientMock.hmget.mockResolvedValue(['1', hash]);
+      await expect(service.verifyJoinPassword('ABC123', '4242')).resolves.toBe(
+        true,
+      );
+    });
+
+    it('비밀방에서 틀린 비밀번호는 거절한다', async () => {
+      const hash = createHash('sha256').update('4242').digest('hex');
+      clientMock.hmget.mockResolvedValue(['1', hash]);
+      await expect(service.verifyJoinPassword('ABC123', '0000')).resolves.toBe(
+        false,
+      );
+    });
+
+    it('비밀방인데 비밀번호가 없으면 거절한다', async () => {
+      clientMock.hmget.mockResolvedValue(['1', 'somehash']);
+      await expect(
+        service.verifyJoinPassword('ABC123', undefined),
+      ).resolves.toBe(false);
+    });
   });
 
   describe('getRoomSummary', () => {
@@ -180,7 +246,29 @@ describe('RoomService', () => {
         gameType: 'roulette',
         participantCount: 3,
         maxParticipants: 50,
+        isSecret: false,
       });
+    });
+
+    it('비밀방이면 isSecret:true 를 주되 비밀번호 해시(joinCodeHash)는 절대 내보내지 않는다', async () => {
+      clientMock.hgetall.mockResolvedValue({
+        title: '비밀회의',
+        hostToken: 't',
+        status: 'waiting',
+        gameType: 'vote',
+        items: '[]',
+        maxParticipants: '12',
+        isSecret: '1',
+        joinCodeHash: 'deadbeefdeadbeef',
+        createdAt: new Date().toISOString(),
+      });
+      clientMock.scard.mockResolvedValue(0);
+
+      const summary = await service.getRoomSummary('SECRET');
+
+      expect(summary.isSecret).toBe(true);
+      expect(JSON.stringify(summary)).not.toContain('deadbeefdeadbeef');
+      expect(summary).not.toHaveProperty('joinCodeHash');
     });
 
     it('게임 미선택(빈 문자열)은 null 로 바꿔 응답한다', async () => {

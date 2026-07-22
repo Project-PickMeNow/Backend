@@ -8,6 +8,7 @@ export const ERROR_CODES = {
   NEED_MORE_ITEMS: 'NEED_MORE_ITEMS', // 항목 2개 미만
   GAME_RUNNING: 'GAME_RUNNING', // 이미 게임 진행 중
   ALREADY_PICKED: 'ALREADY_PICKED', // 제비뽑기 — 참가자가 이미 1개를 뽑음(1인 1제비)
+  NOT_ENOUGH_STICKS: 'NOT_ENOUGH_STICKS', // 제비뽑기 — 제비 수가 참가자 수보다 적어 시작 불가
   NEED_MORE_PLAYERS: 'NEED_MORE_PLAYERS', // 풍선 등 턴제 게임에 참가자가 부족함
   NOT_YOUR_TURN: 'NOT_YOUR_TURN', // 풍선 — 자기 턴이 아닌데 펌프/넘기기
   PUMP_LIMIT: 'PUMP_LIMIT', // 풍선 — 이번 턴 펌프 상한(MAX_PER_TURN) 도달, 더 못 펌프

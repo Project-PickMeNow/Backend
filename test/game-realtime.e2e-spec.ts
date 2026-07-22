@@ -1042,4 +1042,131 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       }
     });
   });
+
+  // ── 투표 라이프사이클: preparing → open → closing(카운트다운) → closed ──
+  describe('투표 라이프사이클 규칙', () => {
+    /** room:state 를 한 번 받아 현재 items 를 읽어온다(itemId 확보용). */
+    const getItems = async (roomId: string): Promise<Item[]> => {
+      const probe = connect(roomId);
+      try {
+        const state = await once<{ items: Item[] }>(probe, 'room:state');
+        return state.items;
+      } finally {
+        probe.disconnect();
+      }
+    };
+
+    it('준비 단계(투표 시작 전)에는 투표할 수 없다 (VOTE_NOT_OPEN)', async () => {
+      const { roomId, host, guest } = await setupGame('vote');
+      try {
+        const items = await getItems(roomId);
+        // 아직 '투표 시작' 전(preparing) — 호스트도 투표할 수 없다(닉네임 무관하게 VOTE_NOT_OPEN).
+        const ack = (await host.emitWithAck('vote:cast', {
+          itemId: items[0].id,
+        })) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'VOTE_NOT_OPEN' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('시작→투표→마감카운트다운→취소→재마감→finalize 전 과정', async () => {
+      const { roomId, host, guest } = await setupGame('vote');
+      try {
+        const items = await getItems(roomId);
+        const itemId = items[0].id;
+
+        // 투표 시작 → open (전원에게 vote:state)
+        const opened = once<{ status: string; closeAt: number | null }>(
+          guest,
+          'vote:state',
+        );
+        expect(await host.emitWithAck('vote:start')).toEqual({ ok: true });
+        expect((await opened).status).toBe('open');
+
+        // 표가 없으면 마감 불가
+        expect(await host.emitWithAck('vote:close')).toEqual({
+          ok: false,
+          code: 'VOTE_NO_VOTES',
+        });
+
+        // 호스트 투표 → open 상태에서 성공(호스트도 투표할 수 있다 · 닉네임 입장 없이 role 로 허용)
+        expect(await host.emitWithAck('vote:cast', { itemId })).toEqual({
+          ok: true,
+        });
+
+        // 마감 → closing + closeAt(약 10초 뒤)
+        const closing = once<{ status: string; closeAt: number | null }>(
+          guest,
+          'vote:state',
+        );
+        expect(await host.emitWithAck('vote:close')).toEqual({ ok: true });
+        const cs = await closing;
+        expect(cs.status).toBe('closing');
+        expect(typeof cs.closeAt).toBe('number');
+        expect(cs.closeAt as number).toBeGreaterThan(Date.now());
+
+        // 취소 → 다시 open
+        const cancelled = once<{ status: string }>(guest, 'vote:state');
+        expect(await host.emitWithAck('vote:cancel')).toEqual({ ok: true });
+        expect((await cancelled).status).toBe('open');
+
+        // 재마감 → closing
+        expect(await host.emitWithAck('vote:close')).toEqual({ ok: true });
+
+        // finalize(카운트다운 0초) → game:result(vote)
+        const resultP = once<{ result: { type: string; winner: Item } }>(
+          host,
+          'game:result',
+        );
+        expect(await host.emitWithAck('vote:finalize')).toEqual({ ok: true });
+        const { result } = await resultP;
+        expect(result.type).toBe('vote');
+        expect(result.winner.id).toBe(itemId);
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('참가자는 투표 시작/마감/취소/finalize 를 할 수 없다 (NOT_HOST)', async () => {
+      const { host, guest } = await setupGame('vote');
+      try {
+        for (const ev of [
+          'vote:start',
+          'vote:close',
+          'vote:cancel',
+          'vote:finalize',
+        ]) {
+          expect(await guest.emitWithAck(ev)).toEqual({
+            ok: false,
+            code: 'NOT_HOST',
+          });
+        }
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('closing 이 아닐 때 finalize 는 결과를 만들지 않는다(멱등)', async () => {
+      const { roomId, host, guest } = await setupGame('vote');
+      try {
+        const items = await getItems(roomId);
+        await host.emitWithAck('vote:start');
+        await host.emitWithAck('vote:cast', { itemId: items[0].id });
+        // open 상태에서 finalize → no-op (ok 지만 결과 없음).
+        expect(await host.emitWithAck('vote:finalize')).toEqual({ ok: true });
+        // 이어서 정상 마감(close→finalize)하면 결과가 온다 — 위 no-op 이 상태를 망가뜨리지 않았음을 확인.
+        const resultP = once<{ result: { type: string } }>(host, 'game:result');
+        await host.emitWithAck('vote:close');
+        await host.emitWithAck('vote:finalize');
+        expect((await resultP).result.type).toBe('vote');
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+  });
 });

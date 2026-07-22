@@ -11,6 +11,13 @@ export const RedisKeys = {
   /** 참가자 목록 (Set) — 닉네임 */
   roomPlayers: (roomId: string) => `room:${roomId}:players`,
 
+  /**
+   * 다음 게임 준비 완료(로비로 돌아온) 참가자 (Set) — 닉네임.
+   * 게임이 시작되면(game:begin) 비워지고, 참가자가 로비로 돌아올 때(room:ready) 채워진다.
+   * 호스트가 새 게임을 시작하려면 현재 참가자 전원이 이 Set 에 있어야 한다(안 돌아온 사람은 60초 뒤 자동 퇴장).
+   */
+  roomReady: (roomId: string) => `room:${roomId}:ready`,
+
   /** 게임 결과 (String, JSON) */
   gameResult: (roomId: string) => `game:${roomId}:result`,
 

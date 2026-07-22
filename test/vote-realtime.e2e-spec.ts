@@ -221,6 +221,30 @@ describe('투표 관통 (e2e)', () => {
     }
   });
 
+  it('⭐ 호스트도 한 표 참여하고, 그 표가 결과(최다 득표)에 반영된다', async () => {
+    const { host, g1, g2, items } = await setupVote();
+    try {
+      // 호스트+g1 은 짜장(items[0]), g2 는 짬뽕(items[1]) → 호스트 표 덕분에 짜장이 2표로 최다.
+      const hostAck = (await host.emitWithAck('vote:cast', {
+        itemId: items[0].id,
+      })) as Ack;
+      expect(hostAck).toEqual({ ok: true }); // 호스트도 투표할 수 있다
+      await g1.emitWithAck('vote:cast', { itemId: items[0].id });
+      await g2.emitWithAck('vote:cast', { itemId: items[1].id });
+
+      const hostResult = once<{ result: { winner: Item; tally: TallyEntry[] } }>(
+        host,
+        'game:result',
+      );
+      await host.emitWithAck('vote:close', {});
+      const h = await hostResult;
+      expect(h.result.winner).toEqual(items[0]); // 짜장 — 호스트 표로 2표 승리
+      expect(h.result.tally.find((t) => t.item.id === items[0].id)!.count).toBe(2);
+    } finally {
+      [host, g1, g2].forEach((s) => s.disconnect());
+    }
+  });
+
   it('참가자는 투표를 마감할 수 없다 (NOT_HOST)', async () => {
     const { host, g1, g2 } = await setupVote();
     try {

@@ -8,7 +8,8 @@ import { GAME_TYPES, GameType } from '../../common/constants/game-type';
 import { Item } from '../room/room.types';
 import { RoomService } from '../room/room.service';
 import {
-  BalloonPoppedPayload,
+  BalloonPassedPayload,
+  BalloonPumpedPayload,
   BalloonStartedPayload,
   DrawPick,
   DrawShuffledPayload,
@@ -47,7 +48,8 @@ interface StoredBalloon {
   capacity: number; // 풍선 크기(최대 펌프 수)
   burstAt: number; // 비밀 — 누적 펌프가 이 값에 도달하면 터진다 (1..capacity)
   pumps: number; // 지금까지 누적 펌프 수
-  turnOrder: string[];
+  turnPumps: number; // 이번 턴에 펌프한 수(0..MAX_PER_TURN)
+  turnOrder: string[]; // 호스트('호스트') 포함
   turnIndex: number;
   caughtBy: string | null;
 }
@@ -141,6 +143,14 @@ export class GameService {
     if (!this.isGameType(room.gameType)) {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 game:select 로 종류를 안 골랐다.
     }
+    // 이전 게임 참가자가 모두 방으로 돌아왔거나(=ready) 나갔어야 새 게임을 시작할 수 있다.
+    // (안 돌아온 사람은 각자 60초 뒤 자동 퇴장해 참가자 목록에서 빠지므로 결국 시작 가능해진다.)
+    const pending = await this.rooms.pendingReturn(roomId);
+    if (pending.length > 0) {
+      throw new GameError(ERROR_CODES.PLAYERS_NOT_READY);
+    }
+    // 새 라운드 시작 — 준비 목록을 비워 이번 게임 종료 후의 복귀를 새로 센다.
+    await this.rooms.clearReady(roomId);
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
     await this.rooms.touchRoom(roomId);
     return room.gameType;
@@ -607,9 +617,12 @@ export class GameService {
       throw new GameError(ERROR_CODES.GAME_RUNNING); // 진행 중엔 재시작 불가
     }
 
-    const turnOrder = await this.redis.client.smembers(
+    const participants = await this.redis.client.smembers(
       RedisKeys.roomPlayers(roomId),
     );
+    // 호스트도 턴 순서에 참가한다. 시작할 때 펌프 순서를 무작위로 섞는다(누가 먼저 펌프할지 랜덤).
+    // 호스트 포함 2명 이상이어야 성립.
+    const turnOrder = this.shuffle([BALLOON.HOST_NAME, ...participants]);
     if (turnOrder.length < BALLOON.MIN_PLAYERS) {
       throw new GameError(ERROR_CODES.NEED_MORE_PLAYERS);
     }
@@ -622,6 +635,7 @@ export class GameService {
       capacity,
       burstAt: randomInt(capacity) + 1, // 비밀 — 1..capacity 째 펌프에 터진다
       pumps: 0,
+      turnPumps: 0,
       turnOrder,
       turnIndex: 0,
       caughtBy: null,
@@ -635,6 +649,7 @@ export class GameService {
       capacity,
       turnOrder,
       turn: turnOrder[0],
+      maxPerTurn: BALLOON.MAX_PER_TURN,
     };
   }
 
@@ -642,10 +657,10 @@ export class GameService {
    * 가운데 풍선 한 번 펌프. 현재 턴 참가자만 가능하다(한 턴에 한 번, 곧바로 다음 사람으로 넘어간다).
    * 누적 펌프가 비밀 순번(burstAt)에 도달하면 풍선이 터져 그 사람이 걸리고 게임이 끝난다.
    */
-  async popBalloon(
+  async pumpBalloon(
     roomId: string,
     by: string,
-  ): Promise<BalloonPoppedPayload> {
+  ): Promise<BalloonPumpedPayload> {
     const s = await this.loadBalloon(roomId);
     if (!s) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 시작 전
     if (s.caughtBy !== null) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 이미 끝남
@@ -653,8 +668,13 @@ export class GameService {
     if (s.turnOrder[s.turnIndex] !== by) {
       throw new GameError(ERROR_CODES.NOT_YOUR_TURN);
     }
+    // 한 턴 펌프 상한 — 다 썼으면 더 못 펌프하고 '넘기기'로 넘겨야 한다.
+    if (s.turnPumps >= BALLOON.MAX_PER_TURN) {
+      throw new GameError(ERROR_CODES.PUMP_LIMIT);
+    }
 
     s.pumps += 1;
+    s.turnPumps += 1;
 
     if (s.pumps >= s.burstAt) {
       // 펑! — 걸림, 게임 종료.
@@ -666,20 +686,68 @@ export class GameService {
         'finished',
       );
       await this.rooms.touchRoom(roomId);
-      return { by, pumps: s.pumps, turn: null, caughtBy: by, burst: true };
+      return {
+        by,
+        pumps: s.pumps,
+        turnPumps: s.turnPumps,
+        turn: null,
+        caughtBy: by,
+        burst: true,
+      };
     }
 
-    // 안 터짐 — 곧바로 다음(자리에 있는) 참가자로 턴을 넘긴다.
-    s.turnIndex = await this.nextTurnIndex(roomId, s);
+    // 안 터짐 — 이번 턴에 MAX_PER_TURN 번을 다 채웠으면 자동으로 다음 사람에게 넘긴다.
+    // 아직 여유가 있으면 턴을 유지해, 같은 사람이 더 펌프하거나 '넘기기'로 일찍 넘길 수 있게 한다.
+    if (s.turnPumps >= BALLOON.MAX_PER_TURN) {
+      s.turnIndex = await this.nextTurnIndex(roomId, s);
+      s.turnPumps = 0;
+    }
     await this.saveBalloon(roomId, s);
     await this.rooms.touchRoom(roomId);
     return {
       by,
       pumps: s.pumps,
+      turnPumps: s.turnPumps,
       turn: s.turnOrder[s.turnIndex],
       caughtBy: null,
       burst: false,
     };
+  }
+
+  /**
+   * '넘기기' — 현재 턴 참가자가 1번 이상 펌프한 뒤 다음(자리에 있는) 사람에게 턴을 넘긴다.
+   * 아직 한 번도 안 펌프했으면 PUMP_FIRST 로 거절한다.
+   */
+  async passBalloon(
+    roomId: string,
+    by: string,
+  ): Promise<BalloonPassedPayload> {
+    const s = await this.loadBalloon(roomId);
+    if (!s) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 아직 시작 전
+    if (s.caughtBy !== null) throw new GameError(ERROR_CODES.VALIDATION_ERROR); // 이미 끝남
+
+    if (s.turnOrder[s.turnIndex] !== by) {
+      throw new GameError(ERROR_CODES.NOT_YOUR_TURN);
+    }
+    if (s.turnPumps < 1) {
+      throw new GameError(ERROR_CODES.PUMP_FIRST); // 1번도 안 펌프하고는 못 넘긴다
+    }
+
+    s.turnIndex = await this.nextTurnIndex(roomId, s);
+    s.turnPumps = 0; // 새 턴 — 이번 턴 펌프 수 초기화
+    await this.saveBalloon(roomId, s);
+    await this.rooms.touchRoom(roomId);
+    return { by, turn: s.turnOrder[s.turnIndex] };
+  }
+
+  /** 배열을 무작위로 섞은 새 배열을 돌려준다(Fisher-Yates, 암호학적 randomInt). 원본은 안 건드린다. */
+  private shuffle<T>(arr: T[]): T[] {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = randomInt(i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
   }
 
   /** 다음 턴 인덱스 — 방을 떠난 참가자는 건너뛴다(모두 떠났으면 제자리). */
@@ -690,6 +758,7 @@ export class GameService {
     const members = new Set(
       await this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
     );
+    members.add(BALLOON.HOST_NAME); // 호스트는 항상 자리에 있다 — 턴을 건너뛰지 않는다.
     let next = s.turnIndex;
     for (let i = 0; i < s.turnOrder.length; i++) {
       next = (next + 1) % s.turnOrder.length;

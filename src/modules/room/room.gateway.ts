@@ -8,6 +8,7 @@ import {
 import { Server } from 'socket.io';
 import { RoomService } from './room.service';
 import { ERROR_CODES } from '../../common/constants/error-code';
+import { BALLOON } from '../../common/constants/balloon';
 import type { AppSocket } from '../../common/types/socket';
 
 /**
@@ -80,6 +81,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
             participants,
             participantCount,
           });
+          await this.emitReady(roomId);
         }
       }
 
@@ -100,6 +102,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
     if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+    // '호스트'는 호스트를 나타내는 예약어(제비뽑기·풍선 턴 순서)라 참가자 닉네임으로 쓸 수 없다.
+    // (풍선 턴 순서에 호스트가 '호스트'로 포함되므로 같은 이름의 참가자가 있으면 턴 판정이 꼬인다.)
+    if (nickname === BALLOON.HOST_NAME) {
+      return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
+    }
 
     // 같은 닉네임으로 다시 눌러도 성공으로 취급(멱등).
     const previous = client.data.nickname;
@@ -154,7 +161,34 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server
       .to(roomId)
       .emit('participant:joined', { nickname, participants, participantCount });
+    // 대기 중(로비)에 들어온 참가자는 다음 게임 준비 완료로 본다 — 게임 시작 게이트에 반영한다.
+    // (게임 중 재접속(reclaim)은 위에서 따로 처리되어 여기 오지 않으므로 status 는 waiting 이다.)
+    if (status === 'waiting') {
+      await this.roomService.markReady(roomId, nickname);
+      await this.emitReady(roomId);
+    }
     return { ok: true };
+  }
+
+  /**
+   * 참가자 '방으로 돌아가기' — 게임이 끝난 뒤 로비로 복귀했음을 알린다. ready Set 에 넣어
+   * 호스트의 '새 게임 시작' 게이트(전원 복귀)를 통과시킨다. 돌아오지 않으면 60초 뒤 클라이언트가
+   * 스스로 나가고(room:leave), 그때 참가자·ready 목록에서 함께 빠진다.
+   */
+  @SubscribeMessage('room:ready')
+  async handleReady(client: AppSocket): Promise<{ ok: boolean }> {
+    const { roomId, nickname } = client.data;
+    if (roomId && nickname) {
+      await this.roomService.markReady(roomId, nickname);
+      await this.emitReady(roomId);
+    }
+    return { ok: true };
+  }
+
+  /** 다음 게임 준비 목록(로비로 돌아온 참가자)을 방 전원에게 알린다 — 호스트 UI 가 시작 버튼을 연다. */
+  private async emitReady(roomId: string): Promise<void> {
+    const ready = await this.roomService.getReady(roomId);
+    this.server.to(roomId).emit('room:readyUpdate', { ready });
   }
 
   /** 명시적 나가기 — disconnect 와 달리 소켓은 살아있지만 참가자 목록에서만 뺀다. */
@@ -168,6 +202,8 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.server
         .to(roomId)
         .emit('participant:left', { nickname, participants, participantCount });
+      // 나가면서 준비 목록도 바뀌었으니 호스트에게 갱신을 알린다(자동 퇴장 시 시작 게이트가 열릴 수 있다).
+      await this.emitReady(roomId);
     }
     return { ok: true };
   }

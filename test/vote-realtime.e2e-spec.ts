@@ -91,6 +91,8 @@ describe('투표 관통 (e2e)', () => {
     await host.emitWithAck('game:select', { gameType: 'vote' });
     await addItem(host, '짜장');
     const items = await addItem(host, '짬뽕');
+    // 라이프사이클: 투표는 '투표 시작'(open) 후에만 던질 수 있다.
+    await host.emitWithAck('vote:start');
     return { host, g1, g2, items };
   };
 
@@ -207,8 +209,10 @@ describe('투표 관통 (e2e)', () => {
         'game:result',
       );
 
+      // '투표 마감' → 카운트다운(closing). finalize 로 즉시 마감해 결과를 낸다.
       const ack = (await host.emitWithAck('vote:close', {})) as Ack;
       expect(ack).toEqual({ ok: true });
+      await host.emitWithAck('vote:finalize');
 
       const [h, g] = await Promise.all([hostResult, g1Result]);
       expect(h.result.winner).toEqual(items[1]); // 짬뽕
@@ -237,6 +241,7 @@ describe('투표 관통 (e2e)', () => {
         'game:result',
       );
       await host.emitWithAck('vote:close', {});
+      await host.emitWithAck('vote:finalize');
       const h = await hostResult;
       expect(h.result.winner).toEqual(items[0]); // 짜장 — 호스트 표로 2표 승리
       expect(h.result.tally.find((t) => t.item.id === items[0].id)!.count).toBe(2);

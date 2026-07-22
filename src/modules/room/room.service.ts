@@ -218,6 +218,7 @@ export class RoomService {
       drawPicks,
       balloonRaw,
       ready,
+      voteRaw,
     ] = await Promise.all([
       this.redis.client.hgetall(RedisKeys.room(roomId)),
       this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
@@ -228,9 +229,11 @@ export class RoomService {
       this.redis.client.hgetall(RedisKeys.gameDrawPicks(roomId)),
       this.redis.client.get(RedisKeys.gameBalloon(roomId)),
       this.redis.client.smembers(RedisKeys.roomReady(roomId)),
+      this.redis.client.get(RedisKeys.gameVoteState(roomId)),
     ]);
 
     const ladderSnapshot = this.parseLadder(ladderRaw);
+    const voteState = this.parseVoteState(voteRaw);
     return {
       roomId,
       title: room.title ?? '',
@@ -251,7 +254,26 @@ export class RoomService {
       draw: this.parseDraw(drawRaw, drawPicks),
       balloon: this.parseBalloon(balloonRaw),
       ready,
+      voteStatus: voteState.status,
+      voteCloseAt: voteState.closeAt,
     };
+  }
+
+  /** 저장된 투표 라이프사이클 상태를 room:state 로 조립한다. 없거나 깨지면 preparing(투표 시작 전). */
+  private parseVoteState(raw: string | null): {
+    status: RoomStatePayload['voteStatus'];
+    closeAt: number | null;
+  } {
+    if (!raw) return { status: 'preparing', closeAt: null };
+    try {
+      const s = JSON.parse(raw) as {
+        status?: RoomStatePayload['voteStatus'];
+        closeAt?: number | null;
+      };
+      return { status: s.status ?? 'preparing', closeAt: s.closeAt ?? null };
+    } catch {
+      return { status: 'preparing', closeAt: null };
+    }
   }
 
   /**
@@ -409,6 +431,7 @@ export class RoomService {
       .expire(RedisKeys.roomReady(roomId), this.ttlSeconds)
       .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
+      .expire(RedisKeys.gameVoteState(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameDraw(roomId), this.ttlSeconds)
@@ -493,6 +516,7 @@ export class RoomService {
       RedisKeys.onlineRoom(roomId),
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
+      RedisKeys.gameVoteState(roomId),
       RedisKeys.gameLadder(roomId),
       RedisKeys.gameLadderRevealed(roomId),
       RedisKeys.gameDraw(roomId),

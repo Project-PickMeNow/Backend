@@ -20,7 +20,7 @@ type Ack = { ok: true } | { ok: false; code: string };
  * 다루는 이벤트 (전부 host 전용, vote:cast/draw:pick 만 참가자도 가능):
  *  item:add / item:remove / item:reorder — 항목
  *  game:select / game:begin / game:start / room:return — 게임 진행
- *  vote:cast / vote:close — 투표
+ *  vote:cast / vote:start / vote:close / vote:cancel / vote:finalize — 투표(라이프사이클)
  *  ladder:build / ladder:reveal / ladder:result / ladder:draft — 사다리
  *  draw:shuffle / draw:pick / draw:autoresolve / draw:draft — 제비뽑기
  *  roulette:draft — 원판 실시간 편집 미리보기
@@ -131,20 +131,24 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
-   * host '방으로 돌아가기'(게임 취소) — 라운드를 접어(결과·투표·사다리·제비 데이터 삭제) 방을
-   * 다시 대기 상태로 되돌리고, game:cancelled 로 방 안의 참가자 전원을 로비로 함께 끌어온다.
-   * (참가자는 game:cancelled 를 받아 로비 복귀 안내를 띄우고 room:ready 로 복귀를 표시한다.)
-   * 이후 게임종류 재선택·재시작·신규 입장이 다시 열린다.
+   * host '방으로 돌아가기' / 게임 설정 단계 뒤로가기 — 라운드를 접어(결과·투표·사다리·제비 데이터
+   * 삭제) 방을 다시 대기 상태로 되돌린다.
+   *  - notify=true (설정 단계에서 좌측 화살표로 게임 취소): game:cancelled 로 참가자 전원을 로비로
+   *    함께 끌어온다(참가자는 안내를 띄우고 room:ready 로 복귀 표시). 참가자가 게임에 갇히는 걸 막는다.
+   *  - notify 없음 (결과 후 '방으로 돌아가기'): 참가자를 강제 이동시키지 않는다 — 각자 결과창의
+   *    '방으로 돌아가기'로 로비에 온다(1분 내 안 오면 클라이언트가 강퇴 안내).
    * room 이벤트지만 GameService.resetGame 재사용을 위해 여기 둔다(RoomModule↔GameModule 순환 의존 회피).
    */
   @SubscribeMessage('room:return')
-  async handleRoomReturn(client: AppSocket): Promise<Ack> {
+  async handleRoomReturn(
+    client: AppSocket,
+    payload?: { notify?: boolean },
+  ): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
       await this.gameService.resetGame(roomId);
-      // 호스트가 게임을 취소하고 로비로 돌아감 — 방 안의 참가자 전원을 로비로 끌어온다.
-      // 발신자(호스트)는 스스로 이미 로비로 돌아가므로 제외하고 참가자에게만 알린다.
-      // 참가자는 game:cancelled 수신 시 로비 복귀 안내를 띄우고 room:ready 로 복귀를 표시한다.
-      client.broadcast.to(roomId).emit('game:cancelled');
+      // 게임 취소(설정 단계 뒤로가기)일 때만 참가자 전원을 로비로 끌어온다. 발신자(호스트)는
+      // 스스로 이미 로비로 돌아가므로 제외하고 참가자에게만 알린다.
+      if (payload?.notify) client.broadcast.to(roomId).emit('game:cancelled');
     });
   }
 
@@ -162,6 +166,23 @@ export class GameGateway implements OnGatewayDisconnect {
         ? payload.labels.filter((l): l is string => typeof l === 'string')
         : [];
       client.broadcast.to(roomId).emit('roulette:draft', { labels });
+      return Promise.resolve();
+    });
+  }
+
+  /**
+   * host 순서 정하기 항목 실시간 미리보기 — 저장하지 않는 relay. 호스트가 항목을 입력하는 동안
+   * 참가자도 '입력 중' 항목을 실시간으로 본다(Enter/＋ 로 커밋하면 item:add 로 확정 공유).
+   * roulette:draft 와 같은 패턴 — 발신자(호스트) 제외하고 방 전원에게 relay.
+   */
+  @SubscribeMessage('order:draft')
+  async handleOrderDraft(
+    client: AppSocket,
+    payload: { label?: string },
+  ): Promise<Ack> {
+    return this.hostAction(client, (roomId) => {
+      const label = typeof payload?.label === 'string' ? payload.label : '';
+      client.broadcast.to(roomId).emit('order:draft', { label });
       return Promise.resolve();
     });
   }
@@ -221,12 +242,42 @@ export class GameGateway implements OnGatewayDisconnect {
     }
   }
 
-  /** host 투표 마감 — 집계 확정 후 최다 득표 결과를 전원에게 broadcast. */
+  /** host '투표 시작' — 준비 단계에서 투표를 연다(open). 이후 참가자·호스트가 투표할 수 있다. */
+  @SubscribeMessage('vote:start')
+  async handleVoteStart(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const state = await this.gameService.openVote(roomId);
+      this.server.to(roomId).emit('vote:state', state);
+    });
+  }
+
+  /** host '투표 마감' — 10초 카운트다운을 시작한다(closing). 전원이 같은 카운트다운(closeAt)을 본다. */
   @SubscribeMessage('vote:close')
   async handleVoteClose(client: AppSocket): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
-      const result = await this.gameService.closeVote(roomId);
-      this.server.to(roomId).emit('game:result', { result });
+      const state = await this.gameService.startVoteClose(roomId);
+      this.server.to(roomId).emit('vote:state', state);
+    });
+  }
+
+  /** host '취소' — 마감 카운트다운을 멈추고 다시 투표를 연다(open). */
+  @SubscribeMessage('vote:cancel')
+  async handleVoteCancel(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const state = await this.gameService.cancelVoteClose(roomId);
+      this.server.to(roomId).emit('vote:state', state);
+    });
+  }
+
+  /**
+   * 카운트다운 종료 → 실제 마감(host 클라이언트가 0초에 호출). closing 상태일 때만 집계를 확정하고
+   * game:result 를 전원에게 broadcast 한다(취소·중복 호출은 무시 — 멱등).
+   */
+  @SubscribeMessage('vote:finalize')
+  async handleVoteFinalize(client: AppSocket): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      const result = await this.gameService.finalizeVote(roomId);
+      if (result) this.server.to(roomId).emit('game:result', { result });
     });
   }
 

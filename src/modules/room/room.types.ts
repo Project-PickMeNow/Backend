@@ -8,6 +8,7 @@ import type {
   LadderStructure,
   DrawState,
   BalloonState,
+  VoteStatus,
 } from '../game/game.types';
 
 /**
@@ -46,6 +47,9 @@ export interface RoomStatePayload {
   balloon: BalloonState | null;
   // 다음 게임을 위해 로비로 돌아온 참가자 닉네임들. 호스트는 현재 참가자 전원이 여기 있어야 새 게임을 시작할 수 있다.
   ready: string[];
+  // 투표 라이프사이클 — 재접속·늦은 입장이 현재 단계(준비/열림/마감중/마감)와 카운트다운을 복원한다.
+  voteStatus: VoteStatus;
+  voteCloseAt: number | null; // 마감 카운트다운 종료 시각(epoch ms). closing 이 아니면 null.
 }
 
 /** 입·퇴장 시 방 전체에 broadcast (participant:joined / participant:left) */

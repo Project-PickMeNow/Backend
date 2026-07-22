@@ -96,6 +96,28 @@ export class GameService {
     return items;
   }
 
+  /**
+   * 항목 내용 수정(id 기준으로 label 만 교체) → 갱신된 전체 목록 반환.
+   * id 를 유지하므로 순서·투표 집계(item.id 기준)가 그대로 보존된다. 없는 id·빈 라벨은 거절.
+   */
+  async updateItem(
+    roomId: string,
+    itemId: string,
+    label: string | undefined,
+  ): Promise<Item[]> {
+    const room = await this.loadRoomOrThrow(roomId);
+    const trimmed = label?.trim();
+    if (!itemId || !trimmed) throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+
+    const items = this.parseItems(room.items);
+    const target = items.find((it) => it.id === itemId);
+    if (!target) throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+
+    target.label = trimmed;
+    await this.saveItems(roomId, items);
+    return items;
+  }
+
   /** 항목 제거(id 기준) → 갱신된 전체 목록 반환 */
   async removeItem(roomId: string, itemId: string): Promise<Item[]> {
     const room = await this.loadRoomOrThrow(roomId);

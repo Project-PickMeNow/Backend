@@ -18,7 +18,7 @@ type Ack = { ok: true } | { ok: false; code: string };
  * — 이벤트마다 hostToken 을 다시 받지 않는다.
  *
  * 다루는 이벤트 (전부 host 전용, vote:cast/draw:pick 만 참가자도 가능):
- *  item:add / item:remove / item:reorder — 항목
+ *  item:add / item:update / item:remove / item:reorder — 항목
  *  game:select / game:begin / game:start / room:return — 게임 진행
  *  vote:cast / vote:start / vote:close / vote:cancel / vote:finalize — 투표(라이프사이클)
  *  ladder:build / ladder:reveal / ladder:result / ladder:draft — 사다리
@@ -72,6 +72,22 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
+  @SubscribeMessage('item:update')
+  async handleItemUpdate(
+    client: AppSocket,
+    payload: { itemId?: string; label?: string },
+  ): Promise<Ack> {
+    return this.hostAction(client, async (roomId) => {
+      if (!payload?.itemId) throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+      const items = await this.gameService.updateItem(
+        roomId,
+        payload.itemId,
+        payload.label,
+      );
+      this.server.to(roomId).emit('item:updated', { items });
+    });
+  }
+
   @SubscribeMessage('item:reorder')
   async handleItemReorder(
     client: AppSocket,
@@ -100,15 +116,21 @@ export class GameGateway implements OnGatewayDisconnect {
     });
   }
 
+  /** 게임 시작 카운트다운(ms) — 호스트가 '게임 시작 ▶'을 누르면 이 시간 뒤에 게임 화면이 열린다. */
+  private static readonly BEGIN_COUNTDOWN_MS = 3000;
+
   /**
    * host '게임 시작 ▶' — 아직 결과는 없지만 참가자를 대기(QR) 화면에서 실제 게임 화면으로
    * 옮겨, 이후 호스트가 항목·라벨을 채우는 과정과 게임이 진행되는 과정을 실시간으로 보게 한다.
+   * 전원이 같은 시각(startAt)으로 3초 카운트다운을 함께 보도록 startAt(epoch ms)을 실어 보낸다.
    */
   @SubscribeMessage('game:begin')
   async handleGameBegin(client: AppSocket): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
       const gameType = await this.gameService.beginGame(roomId);
-      this.server.to(roomId).emit('game:begin', { gameType });
+      // 전원이 같은 시각에 게임이 열리도록 절대 시각을 공유한다(각자 로컬 시계로 카운트다운).
+      const startAt = Date.now() + GameGateway.BEGIN_COUNTDOWN_MS;
+      this.server.to(roomId).emit('game:begin', { gameType, startAt });
       // 새 라운드 — 서버가 준비 목록을 비웠음을 전원에 반영(다음 게임 종료 후의 복귀를 새로 센다).
       this.server.to(roomId).emit('room:readyUpdate', { ready: [] });
     });

@@ -7,6 +7,7 @@ import {
 import { Server } from 'socket.io';
 import { GameService, GameError } from './game.service';
 import { ERROR_CODES } from '../../common/constants/error-code';
+import { BALLOON } from '../../common/constants/balloon';
 import type { AppSocket } from '../../common/types/socket';
 
 type Ack = { ok: true } | { ok: false; code: string };
@@ -108,6 +109,8 @@ export class GameGateway implements OnGatewayDisconnect {
     return this.hostAction(client, async (roomId) => {
       const gameType = await this.gameService.beginGame(roomId);
       this.server.to(roomId).emit('game:begin', { gameType });
+      // 새 라운드 — 서버가 준비 목록을 비웠음을 전원에 반영(다음 게임 종료 후의 복귀를 새로 센다).
+      this.server.to(roomId).emit('room:readyUpdate', { ready: [] });
     });
   }
 
@@ -160,20 +163,22 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
-   * 참가자 투표 — host 전용이 아니라 입장한 참가자면 누구나 던진다.
-   * 입장(닉네임 확정) 여부는 검사하되, 표 키는 socket.id 를 쓴다.
-   * 닉네임을 키로 쓰면 닉네임을 바꿔 재입장해 옛 표를 남기는 식으로 중복 투표가 가능하다.
-   * socket.id 는 한 연결 내내 고정이라 같은 소켓은 무슨 짓을 해도 1표만 갖는다.
+   * 투표 — 입장한 참가자와 호스트가 던질 수 있다(호스트도 한 표 참여).
+   * 표 키는 socket.id 를 쓴다. 닉네임을 키로 쓰면 닉네임을 바꿔 재입장해 옛 표를 남기는 식으로
+   * 중복 투표가 가능하다. socket.id 는 한 연결 내내 고정이라 같은 소켓은 무슨 짓을 해도 1표만 갖는다.
+   * 호스트는 닉네임이 없으므로 role 로 통과시킨다(표 키는 마찬가지로 호스트 소켓의 id).
    */
   @SubscribeMessage('vote:cast')
   async handleVoteCast(
     client: AppSocket,
     payload: { itemId?: string },
   ): Promise<Ack> {
-    const { roomId, nickname } = client.data;
+    const { roomId, nickname, role } = client.data;
     if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
-    // 닉네임 없이(=아직 입장 안 함) 투표할 수 없다.
-    if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+    // 아직 입장 안 한(닉네임 없는) 참가자만 막는다 — 호스트는 role 로 허용.
+    if (!nickname && role !== 'host') {
+      return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+    }
 
     try {
       const tally = await this.gameService.castVote(
@@ -309,19 +314,41 @@ export class GameGateway implements OnGatewayDisconnect {
   }
 
   /**
-   * 가운데 풍선 펌프 — 현재 턴 참가자만. 한 번 펌프하면 곧바로 다음 사람 차례가 되고,
-   * 누적 펌프가 비밀 순번에 도달하면 그 사람이 걸리고 게임 종료.
-   * host 는 턴 순서에 없으므로(닉네임 없음) 펌프할 수 없다. 결과는 balloon:popped 로 전원 broadcast.
+   * 가운데 풍선 펌프 — 현재 턴 참가자만(호스트도 참가하므로 host 도 자기 턴엔 펌프 가능).
+   * 한 턴에 최대 MAX_PER_TURN 번 펌프할 수 있고, 펌프해도 턴은 유지된다(자동으로 안 넘어감).
+   * 누적 펌프가 비밀 순번에 도달하면 그 사람이 걸리고 게임 종료. 결과는 balloon:pumped 로 전원 broadcast.
    */
-  @SubscribeMessage('balloon:pop')
-  async handleBalloonPop(client: AppSocket): Promise<Ack> {
-    const { roomId, nickname } = client.data;
+  @SubscribeMessage('balloon:pump')
+  async handleBalloonPump(client: AppSocket): Promise<Ack> {
+    const { roomId, nickname, role } = client.data;
     if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
-    if (!nickname) return this.fail(client, ERROR_CODES.NOT_YOUR_TURN); // host·미입장은 턴 없음
+    const by = nickname ?? (role === 'host' ? BALLOON.HOST_NAME : undefined);
+    if (!by) return this.fail(client, ERROR_CODES.NOT_YOUR_TURN); // 미입장(닉네임 없는 비호스트)은 턴 없음
 
     try {
-      const popped = await this.gameService.popBalloon(roomId, nickname);
-      this.server.to(roomId).emit('balloon:popped', popped);
+      const pumped = await this.gameService.pumpBalloon(roomId, by);
+      this.server.to(roomId).emit('balloon:pumped', pumped);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof GameError) return this.fail(client, err.code);
+      throw err;
+    }
+  }
+
+  /**
+   * '넘기기' — 현재 턴 참가자(호스트 포함)가 1번 이상 펌프한 뒤 다음 사람에게 턴을 넘긴다.
+   * 결과는 balloon:passed 로 전원 broadcast 된다.
+   */
+  @SubscribeMessage('balloon:pass')
+  async handleBalloonPass(client: AppSocket): Promise<Ack> {
+    const { roomId, nickname, role } = client.data;
+    if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
+    const by = nickname ?? (role === 'host' ? BALLOON.HOST_NAME : undefined);
+    if (!by) return this.fail(client, ERROR_CODES.NOT_YOUR_TURN);
+
+    try {
+      const passed = await this.gameService.passBalloon(roomId, by);
+      this.server.to(roomId).emit('balloon:passed', passed);
       return { ok: true };
     } catch (err) {
       if (err instanceof GameError) return this.fail(client, err.code);

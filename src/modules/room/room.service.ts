@@ -7,6 +7,7 @@ import { CreateRoomDto, CreateRoomResponse } from './dto/create-room.dto';
 import { RedisKeys } from '../../common/constants/redis-keys';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { ROOM_CAPACITY } from '../../common/constants/room-capacity';
+import { BALLOON } from '../../common/constants/balloon';
 import { Item, RoomStatePayload } from './room.types';
 
 /**
@@ -183,6 +184,7 @@ export class RoomService {
       drawRaw,
       drawPicks,
       balloonRaw,
+      ready,
     ] = await Promise.all([
       this.redis.client.hgetall(RedisKeys.room(roomId)),
       this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
@@ -192,6 +194,7 @@ export class RoomService {
       this.redis.client.get(RedisKeys.gameDraw(roomId)),
       this.redis.client.hgetall(RedisKeys.gameDrawPicks(roomId)),
       this.redis.client.get(RedisKeys.gameBalloon(roomId)),
+      this.redis.client.smembers(RedisKeys.roomReady(roomId)),
     ]);
 
     const ladderSnapshot = this.parseLadder(ladderRaw);
@@ -213,6 +216,7 @@ export class RoomService {
         .filter((n) => Number.isInteger(n)),
       draw: this.parseDraw(drawRaw, drawPicks),
       balloon: this.parseBalloon(balloonRaw),
+      ready,
     };
   }
 
@@ -258,6 +262,7 @@ export class RoomService {
       const s = JSON.parse(raw) as {
         capacity: number;
         pumps: number;
+        turnPumps: number;
         turnOrder: string[];
         turnIndex: number;
         caughtBy: string | null;
@@ -265,6 +270,8 @@ export class RoomService {
       return {
         capacity: s.capacity,
         pumps: s.pumps ?? 0,
+        turnPumps: s.turnPumps ?? 0,
+        maxPerTurn: BALLOON.MAX_PER_TURN,
         turnOrder: s.turnOrder ?? [],
         turn: s.caughtBy ? null : (s.turnOrder?.[s.turnIndex] ?? null),
         caughtBy: s.caughtBy ?? null,
@@ -365,6 +372,7 @@ export class RoomService {
       .multi()
       .expire(RedisKeys.room(roomId), this.ttlSeconds)
       .expire(RedisKeys.roomPlayers(roomId), this.ttlSeconds)
+      .expire(RedisKeys.roomReady(roomId), this.ttlSeconds)
       .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
       .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
@@ -375,16 +383,52 @@ export class RoomService {
       .exec();
   }
 
-  /** 참가자 퇴장 — players Set 에서 제거 */
+  /** 참가자 퇴장 — players Set 에서 제거(다음 게임 준비 목록에서도 함께 제거). */
   async removeParticipant(
     roomId: string,
     nickname: string,
   ): Promise<{ participants: string[]; participantCount: number }> {
     await this.redis.client.srem(RedisKeys.roomPlayers(roomId), nickname);
+    // 나간 사람은 '돌아온 목록'에서도 빼야, 남은 참가자 기준으로 새 게임 시작 여부를 판단한다.
+    await this.redis.client.srem(RedisKeys.roomReady(roomId), nickname);
     const participants = await this.redis.client.smembers(
       RedisKeys.roomPlayers(roomId),
     );
     return { participants, participantCount: participants.length };
+  }
+
+  // ── 다음 게임 준비(로비 복귀) 상태 ─────────────────────────────
+  // 게임이 끝나면 참가자는 각자 '방으로 돌아가기'(room:ready)로 로비에 돌아오거나 60초 뒤 자동 퇴장한다.
+  // 호스트는 현재 참가자 전원이 돌아왔을 때만 새 게임을 시작할 수 있다(pendingReturn 이 빌 때).
+
+  /** 참가자가 로비로 돌아옴(다음 게임 준비 완료) — ready Set 에 추가하고 갱신된 목록을 반환. */
+  async markReady(roomId: string, nickname: string): Promise<string[]> {
+    await this.redis.client.sadd(RedisKeys.roomReady(roomId), nickname);
+    await this.redis.client.expire(
+      RedisKeys.roomReady(roomId),
+      this.ttlSeconds,
+    );
+    return this.redis.client.smembers(RedisKeys.roomReady(roomId));
+  }
+
+  /** ready Set 비우기 — 게임이 시작되면(beginGame) 호출해 다음 라운드를 새로 센다. */
+  async clearReady(roomId: string): Promise<void> {
+    await this.redis.client.del(RedisKeys.roomReady(roomId));
+  }
+
+  /** 다음 게임 준비된(로비로 돌아온) 참가자 닉네임 목록. */
+  async getReady(roomId: string): Promise<string[]> {
+    return this.redis.client.smembers(RedisKeys.roomReady(roomId));
+  }
+
+  /** 아직 방으로 안 돌아온 참가자(현재 참가자 중 ready 에 없는 사람). 비어야 새 게임을 시작할 수 있다. */
+  async pendingReturn(roomId: string): Promise<string[]> {
+    const [players, ready] = await Promise.all([
+      this.redis.client.smembers(RedisKeys.roomPlayers(roomId)),
+      this.redis.client.smembers(RedisKeys.roomReady(roomId)),
+    ]);
+    const readySet = new Set(ready);
+    return players.filter((p) => !readySet.has(p));
   }
 
   /** 소켓 접속 등록 → 이 방의 현재 접속 소켓 수 반환 */
@@ -411,6 +455,7 @@ export class RoomService {
     await this.redis.client.del(
       RedisKeys.room(roomId),
       RedisKeys.roomPlayers(roomId),
+      RedisKeys.roomReady(roomId),
       RedisKeys.onlineRoom(roomId),
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),

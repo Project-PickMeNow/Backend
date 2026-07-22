@@ -43,6 +43,8 @@ export interface RoomStatePayload {
   draw: DrawState | null;
   // 풍선 게임이 진행 중이면 그 상태(총 개수·터진 풍선·턴 순서·현재 턴·걸린 사람). 아니면 null.
   balloon: BalloonState | null;
+  // 다음 게임을 위해 로비로 돌아온 참가자 닉네임들. 호스트는 현재 참가자 전원이 여기 있어야 새 게임을 시작할 수 있다.
+  ready: string[];
 }
 
 /** 입·퇴장 시 방 전체에 broadcast (participant:joined / participant:left) */

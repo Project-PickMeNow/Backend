@@ -342,19 +342,22 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       capacity: number;
       turnOrder: string[];
       turn: string;
+      maxPerTurn: number;
     };
-    type Popped = {
+    type Pumped = {
       by: string;
       pumps: number;
+      turnPumps: number;
       turn: string | null;
       caughtBy: string | null;
       burst: boolean;
     };
+    type Passed = { by: string; turn: string };
 
-    it('참가자가 2명 미만이면 시작할 수 없다 (NEED_MORE_PLAYERS)', async () => {
+    it('참가자가 없으면(호스트만) 시작할 수 없다 (NEED_MORE_PLAYERS)', async () => {
       const { host, guest } = await setupGame('balloon');
       try {
-        await guest.emitWithAck('room:join', { nickname: '혼자' }); // 1명뿐
+        // 아무도 room:join 하지 않음 — 호스트 혼자(턴 1명)로는 게임이 성립하지 않는다.
         const ack = (await host.emitWithAck('balloon:start', {
           total: 6,
         })) as Ack;
@@ -365,66 +368,140 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       }
     });
 
-    it('관통 — 턴 순서 강제·한 번씩 펌프·풍선 터뜨린 사람이 걸림', async () => {
+    it("'호스트' 닉네임은 예약어라 참가자가 쓸 수 없다 (NICKNAME_TAKEN)", async () => {
+      const { host, guest } = await setupGame('balloon');
+      try {
+        // 호스트가 턴 순서에 '호스트'로 들어가므로, 같은 이름의 참가자는 막아야 턴 판정이 안 꼬인다.
+        const ack = (await guest.emitWithAck('room:join', {
+          nickname: '호스트',
+        })) as Ack;
+        expect(ack).toEqual({ ok: false, code: 'NICKNAME_TAKEN' });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('관통 — 호스트 포함 턴 순서·3펌프 시 자동 넘김·터뜨린 사람이 걸림', async () => {
       const { roomId, host, guest } = await setupGame('balloon');
       const p1 = connect(roomId);
       const p2 = connect(roomId);
       try {
         await p1.emitWithAck('room:join', { nickname: 'A' });
         await p2.emitWithAck('room:join', { nickname: 'B' });
-        const sock: Record<string, typeof p1> = { A: p1, B: p2 };
+        const sock: Record<string, typeof p1> = { 호스트: host, A: p1, B: p2 };
 
         const started = once<Started>(host, 'balloon:started');
         const ack0 = (await host.emitWithAck('balloon:start', {
-          total: 6,
+          total: 30,
         })) as Ack;
         expect(ack0).toEqual({ ok: true });
         const s = await started;
-        expect([...s.turnOrder].sort()).toEqual(['A', 'B']);
-        expect(['A', 'B']).toContain(s.turn);
-        expect(s.capacity).toBe(6);
-
-        // host 는 턴이 없어 펌프할 수 없다.
-        expect(await host.emitWithAck('balloon:pop', {})).toEqual({
-          ok: false,
-          code: 'NOT_YOUR_TURN',
-        });
+        // 호스트를 포함해 3명이 턴 순서에 들어가고, 순서는 무작위로 섞인다. 첫 턴은 순서의 맨 앞.
+        expect([...s.turnOrder].sort()).toEqual(['A', 'B', '호스트']);
+        expect(s.turn).toBe(s.turnOrder[0]);
+        expect(s.maxPerTurn).toBe(3);
+        expect(s.capacity).toBe(30);
 
         let turn = s.turn;
         let caught: string | null = null;
-        let expectedPumps = 0;
+        let totalPumps = 0;
         let guard = 0;
-        while (!caught && guard++ < 30) {
-          const other = turn === 'A' ? 'B' : 'A';
+        while (!caught && guard++ < 100) {
+          const other = s.turnOrder.find((n) => n !== turn) as string;
           // 내 턴이 아닌 사람은 펌프할 수 없다.
-          expect(await sock[other].emitWithAck('balloon:pop', {})).toEqual({
+          expect(await sock[other].emitWithAck('balloon:pump', {})).toEqual({
             ok: false,
             code: 'NOT_YOUR_TURN',
           });
+          // 1번도 안 펌프하고는 넘길 수 없다.
+          expect(await sock[turn].emitWithAck('balloon:pass', {})).toEqual({
+            ok: false,
+            code: 'PUMP_FIRST',
+          });
 
-          const evt = once<Popped>(host, 'balloon:popped');
-          const ack = (await sock[turn].emitWithAck('balloon:pop', {})) as Ack;
-          expect(ack).toEqual({ ok: true });
-          const p = await evt;
-          expectedPumps += 1;
-          expect(p.by).toBe(turn);
-          expect(p.pumps).toBe(expectedPumps); // 한 번 펌프마다 누적 +1
-          if (p.burst) {
-            caught = p.caughtBy;
-            expect(p.caughtBy).toBe(turn); // 터뜨린 사람이 걸린다
-            expect(p.turn).toBeNull();
-          } else {
-            expect(p.caughtBy).toBeNull();
-            expect(p.turn).toBe(other); // 곧바로 다음 사람으로 넘어간다
-            turn = p.turn as string;
+          let turnPumps = 0;
+          let advanced = false;
+          while (!advanced) {
+            const evt = once<Pumped>(host, 'balloon:pumped');
+            const ack = (await sock[turn].emitWithAck(
+              'balloon:pump',
+              {},
+            )) as Ack;
+            expect(ack).toEqual({ ok: true });
+            const p = await evt;
+            turnPumps += 1;
+            totalPumps += 1;
+            expect(p.by).toBe(turn);
+            expect(p.pumps).toBe(totalPumps); // 누적 펌프 수 +1
+            if (p.burst) {
+              caught = p.caughtBy;
+              expect(p.caughtBy).toBe(turn); // 터뜨린 사람이 걸린다
+              expect(p.turn).toBeNull();
+              advanced = true;
+            } else if (turnPumps >= 3) {
+              // 3번째 펌프 → '넘기기' 없이도 자동으로 다음 사람에게 넘어간다.
+              expect(p.caughtBy).toBeNull();
+              expect(p.turnPumps).toBe(0); // 다음 사람의 턴 펌프 수는 0
+              expect(p.turn).not.toBe(turn);
+              expect(s.turnOrder).toContain(p.turn as string);
+              turn = p.turn as string;
+              advanced = true;
+            } else {
+              // 1,2번째 펌프 → 턴은 그대로 유지(자동으로 안 넘어감).
+              expect(p.caughtBy).toBeNull();
+              expect(p.turnPumps).toBe(turnPumps);
+              expect(p.turn).toBe(turn);
+            }
           }
         }
-        expect(['A', 'B']).toContain(caught); // 풍선을 터뜨린 참가자가 걸렸다
-        expect(expectedPumps).toBeLessThanOrEqual(6); // capacity 안에서 반드시 터진다
+        expect(s.turnOrder).toContain(caught); // 호스트 포함 누군가 걸렸다
+        expect(totalPumps).toBeLessThanOrEqual(30); // capacity 안에서 반드시 터진다
       } finally {
         host.disconnect();
         guest.disconnect();
         p1.disconnect();
+        p2.disconnect();
+      }
+    });
+
+    it('넘기기 — 3번을 다 채우기 전에도 다음 사람으로 넘길 수 있다', async () => {
+      const { roomId, host, guest } = await setupGame('balloon');
+      const p2 = connect(roomId);
+      try {
+        await guest.emitWithAck('room:join', { nickname: 'A' });
+        await p2.emitWithAck('room:join', { nickname: 'B' });
+        const sock: Record<string, typeof host> = { 호스트: host, A: guest, B: p2 };
+        const started = once<Started>(host, 'balloon:started');
+        await host.emitWithAck('balloon:start', { total: 30 });
+        const s = await started; // 순서는 무작위 — 첫 턴은 turnOrder[0]
+        const first = s.turnOrder[0];
+        const second = s.turnOrder[1];
+        expect(s.turn).toBe(first);
+
+        // 첫 턴 사람이 1번만 펌프한다.
+        const pumpEvt = once<Pumped>(host, 'balloon:pumped');
+        expect(await sock[first].emitWithAck('balloon:pump', {})).toEqual({
+          ok: true,
+        });
+        const p = await pumpEvt;
+        if (p.burst) {
+          expect(p.caughtBy).toBe(first); // 드물게 첫 펌프에 터짐 — 걸림만 확인
+        } else {
+          expect(p.turn).toBe(first); // 아직 턴 유지
+          expect(p.turnPumps).toBe(1);
+          // 3번을 다 채우기 전에 '넘기기' → 다음 사람으로 넘어간다.
+          const passEvt = once<Passed>(host, 'balloon:passed');
+          expect(await sock[first].emitWithAck('balloon:pass', {})).toEqual({
+            ok: true,
+          });
+          const pd = await passEvt;
+          expect(pd.by).toBe(first);
+          expect(pd.turn).toBe(second);
+        }
+      } finally {
+        host.disconnect();
+        guest.disconnect();
         p2.disconnect();
       }
     });
@@ -436,11 +513,11 @@ describe('GameGateway 게임 관통 (e2e)', () => {
         await guest.emitWithAck('room:join', { nickname: 'A' });
         await p2.emitWithAck('room:join', { nickname: 'B' });
         const started = once<Started>(host, 'balloon:started');
-        await host.emitWithAck('balloon:start', { total: 6 });
+        await host.emitWithAck('balloon:start', { total: 30 });
         await started;
 
         const again = (await host.emitWithAck('balloon:start', {
-          total: 6,
+          total: 30,
         })) as Ack;
         expect(again).toEqual({ ok: false, code: 'GAME_RUNNING' });
       } finally {
@@ -460,6 +537,55 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       } finally {
         host.disconnect();
         guest.disconnect();
+      }
+    });
+  });
+
+  // ── 새 게임 시작 게이트: 이전 게임 참가자가 전부 방으로 돌아오거나(room:ready) 나가야 시작 가능 ──
+  describe('새 게임 시작 게이트(전원 복귀)', () => {
+    it('안 돌아온 참가자가 있으면 새 게임을 시작할 수 없다 (PLAYERS_NOT_READY)', async () => {
+      const { host, guest } = await setupGame('roulette');
+      try {
+        await guest.emitWithAck('room:join', { nickname: 'A' });
+        // 첫 게임 시작 — A 는 입장으로 준비됨(ready). 시작하면 준비 목록이 비워진다.
+        expect(await host.emitWithAck('game:begin')).toEqual({ ok: true });
+        // 호스트가 방으로 돌아감(대기 전환). A 는 아직 결과 화면이라 안 돌아옴.
+        await host.emitWithAck('room:return');
+        // 새 게임 시작 시도 — A 미복귀로 거절.
+        expect(await host.emitWithAck('game:begin')).toEqual({
+          ok: false,
+          code: 'PLAYERS_NOT_READY',
+        });
+        // A 가 '방으로 돌아가기'(room:ready) → 전원 복귀 → 시작 가능.
+        await guest.emitWithAck('room:ready');
+        expect(await host.emitWithAck('game:begin')).toEqual({ ok: true });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+      }
+    });
+
+    it('안 돌아온 참가자가 나가면(자동 퇴장) 남은 전원 기준으로 시작할 수 있다', async () => {
+      const { roomId, host, guest } = await setupGame('roulette');
+      const p2 = connect(roomId);
+      try {
+        await guest.emitWithAck('room:join', { nickname: 'A' });
+        await p2.emitWithAck('room:join', { nickname: 'B' });
+        expect(await host.emitWithAck('game:begin')).toEqual({ ok: true });
+        await host.emitWithAck('room:return');
+        await guest.emitWithAck('room:ready'); // A 만 복귀
+        // B 미복귀 → 아직 거절.
+        expect(await host.emitWithAck('game:begin')).toEqual({
+          ok: false,
+          code: 'PLAYERS_NOT_READY',
+        });
+        // B 가 나감(60초 뒤 자동 퇴장 상당) → 남은 참가자(A) 전원 복귀 → 시작 가능.
+        await p2.emitWithAck('room:leave');
+        expect(await host.emitWithAck('game:begin')).toEqual({ ok: true });
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+        p2.disconnect();
       }
     });
   });

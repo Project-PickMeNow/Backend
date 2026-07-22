@@ -95,36 +95,47 @@ export interface DrawShuffledPayload {
 }
 
 // ── 풍선 터뜨리기 (러시안 룰렛식, 턴제) ─────────────────────────────
-// game:result 로 안 끝난다. 호스트가 풍선 개수를 정해 시작(balloon:start)하면 서버가
-// 그중 하나를 비밀 폭탄으로 정한다. 참가자들이 순서대로 턴을 받아 자기 턴에 최대 3번 터뜨리고,
-// 폭탄 풍선을 터뜨린 사람이 걸리며(caughtBy) 게임이 끝난다.
+// game:result 로 안 끝난다. 호스트가 풍선 크기를 정해 시작(balloon:start)하면 서버가
+// 1..크기 사이의 비밀 '터지는 순번'을 정한다. 호스트를 포함한 참가자들이 순서대로 턴을 받아
+// 자기 턴에 최대 maxPerTurn 번 펌프(balloon:pump)하고, 1번 이상 펌프한 뒤 '넘기기'(balloon:pass)로
+// 다음 사람에게 넘긴다. 누적 펌프가 터지는 순번에 도달하는 순간 펌프한 사람이 걸리며(caughtBy) 끝난다.
 
 /**
  * 풍선 게임 진행 상태 (room:state 복원용). burstAt(터지는 순번)은 서버 비밀이라 여기 없다.
- * turn 은 지금 펌프할 차례인 참가자(걸린 뒤엔 null).
+ * turn 은 지금 펌프할 차례(걸린 뒤엔 null). 호스트 차례면 turn='호스트'.
  */
 export interface BalloonState {
   capacity: number; // 풍선 크기(이만큼 펌프하면 반드시 터짐)
   pumps: number; // 지금까지 누적 펌프 수
-  turnOrder: string[]; // 참가자 닉네임 순서(시작 시 스냅샷)
-  turn: string | null; // 현재 턴 참가자(걸린 뒤 null)
+  turnPumps: number; // 이번 턴에 펌프한 수(0..maxPerTurn)
+  maxPerTurn: number; // 한 턴에 펌프할 수 있는 최대 횟수
+  turnOrder: string[]; // 턴 순서(호스트 포함, 시작 시 스냅샷)
+  turn: string | null; // 현재 턴(걸린 뒤 null). 호스트 차례면 '호스트'
   caughtBy: string | null; // 풍선을 터뜨려 걸린 참가자(진행 중이면 null)
 }
 
-/** balloon:started broadcast — 게임 시작(터지는 순번은 비밀). */
+/** balloon:started broadcast — 게임 시작(터지는 순번은 비밀). turnOrder 는 호스트를 포함한다. */
 export interface BalloonStartedPayload {
   capacity: number;
-  turnOrder: string[];
-  turn: string; // 첫 턴 참가자
+  turnOrder: string[]; // 호스트 포함
+  turn: string; // 첫 턴
+  maxPerTurn: number;
 }
 
-/** balloon:popped broadcast — 누군가 풍선을 한 번 펌프할 때마다. */
-export interface BalloonPoppedPayload {
-  by: string; // 이번에 펌프한 참가자
+/** balloon:pumped broadcast — 현재 턴 참가자가 풍선을 한 번 펌프할 때마다(턴은 유지된다). */
+export interface BalloonPumpedPayload {
+  by: string; // 이번에 펌프한 참가자('호스트' 포함)
   pumps: number; // 갱신된 누적 펌프 수
-  turn: string | null; // 다음 턴 참가자 — 걸렸으면 null
+  turnPumps: number; // 갱신된 이번 턴 펌프 수
+  turn: string | null; // 유지되는 현재 턴 — 걸렸으면 null
   caughtBy: string | null; // 이 펌프로 터져 걸렸으면 그 사람, 아니면 null
   burst: boolean; // 이 펌프로 풍선이 터졌는지
+}
+
+/** balloon:passed broadcast — 현재 턴 참가자가 '넘기기'로 다음 사람에게 턴을 넘길 때. */
+export interface BalloonPassedPayload {
+  by: string; // 넘긴 사람('호스트' 포함)
+  turn: string; // 다음 턴 참가자(넘긴 뒤 그 사람의 turnPumps 는 0)
 }
 
 /** 투표 집계 한 줄 — 항목 하나와 그 득표 수 */

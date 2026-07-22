@@ -19,6 +19,7 @@ import {
   LadderResultPayload,
   LadderRevealedPayload,
   VoteResult,
+  VoteStatePayload,
   VoteTallyEntry,
 } from './game.types';
 import { ENGINES } from './engines';
@@ -27,6 +28,7 @@ import { generateLadder } from './engines/ladder';
 import { LADDER } from '../../common/constants/ladder';
 import { DRAW } from '../../common/constants/draw';
 import { BALLOON } from '../../common/constants/balloon';
+import { VOTE } from '../../common/constants/vote';
 import { capacityForGame } from '../../common/constants/room-capacity';
 
 /**
@@ -198,6 +200,7 @@ export class GameService {
     await this.redis.client.del(
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
+      RedisKeys.gameVoteState(roomId),
       RedisKeys.gameLadder(roomId),
       RedisKeys.gameLadderRevealed(roomId),
       RedisKeys.gameDraw(roomId),
@@ -376,9 +379,11 @@ export class GameService {
     if (room.gameType !== 'vote') {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
-    if (room.status === 'finished') {
-      // 이미 마감된 투표엔 던질 수 없다.
-      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    // '투표 시작' 후(open) 또는 마감 카운트다운 중(closing)에만 투표할 수 있다.
+    // 준비 중(preparing)이거나 이미 마감(closed)이면 거절한다.
+    const state = await this.getVoteState(roomId);
+    if (state.status !== 'open' && state.status !== 'closing') {
+      throw new GameError(ERROR_CODES.VOTE_NOT_OPEN);
     }
 
     const items = this.parseItems(room.items);
@@ -392,15 +397,88 @@ export class GameService {
     return this.voteEngine.tally(items, await this.loadChoices(roomId));
   }
 
-  /**
-   * host 투표 마감 → 집계 확정 + 최다 득표 결과 저장, stats +1.
-   * 결과는 서버가 한 번만 계산해 game:result 로 전원에게 broadcast 된다(모두 같은 결과).
-   */
-  async closeVote(roomId: string): Promise<VoteResult> {
+  // ── 투표 라이프사이클(preparing → open → closing → closed) ─────────────
+  // 상태는 game:{id}:vote:state(JSON)에 저장하고, 전환 때마다 게이트웨이가 vote:state 로 broadcast 한다.
+  // 없으면 preparing(투표 시작 전)으로 본다. room:state 에도 실려 재접속·늦은 입장이 현재 단계를 복원한다.
+
+  /** 현재 투표 상태를 읽는다(없으면 preparing). */
+  async getVoteState(roomId: string): Promise<VoteStatePayload> {
+    const raw = await this.redis.client.get(RedisKeys.gameVoteState(roomId));
+    if (!raw) return { status: 'preparing', closeAt: null };
+    try {
+      const s = JSON.parse(raw) as Partial<VoteStatePayload>;
+      const status = s.status ?? 'preparing';
+      return { status, closeAt: s.closeAt ?? null };
+    } catch {
+      return { status: 'preparing', closeAt: null };
+    }
+  }
+
+  /** 투표 상태를 저장한다(방 TTL 과 같은 수명). */
+  private async setVoteState(
+    roomId: string,
+    state: VoteStatePayload,
+  ): Promise<VoteStatePayload> {
+    await this.redis.client.set(
+      RedisKeys.gameVoteState(roomId),
+      JSON.stringify(state),
+      'EX',
+      this.rooms.ttl,
+    );
+    await this.rooms.touchRoom(roomId);
+    return state;
+  }
+
+  /** host '투표 시작' — 준비 단계에서 투표를 연다(open). 이후 참가자·호스트가 투표할 수 있다. */
+  async openVote(roomId: string): Promise<VoteStatePayload> {
     const room = await this.loadRoomOrThrow(roomId);
     if (room.gameType !== 'vote') {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
+    return this.setVoteState(roomId, { status: 'open', closeAt: null });
+  }
+
+  /**
+   * host '투표 마감' — 10초 카운트다운을 시작한다(closing). 투표가 열려 있고(open) 1표 이상이어야 한다.
+   * closeAt(서버 epoch ms)을 정해 전원이 같은 카운트다운을 본다. 0이 되면 finalizeVote 로 실제 마감.
+   */
+  async startVoteClose(roomId: string): Promise<VoteStatePayload> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'vote') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+    const cur = await this.getVoteState(roomId);
+    if (cur.status !== 'open') {
+      throw new GameError(ERROR_CODES.VOTE_NOT_OPEN);
+    }
+    const votes = await this.redis.client.hlen(RedisKeys.gameVotes(roomId));
+    if (votes < 1) {
+      throw new GameError(ERROR_CODES.VOTE_NO_VOTES);
+    }
+    return this.setVoteState(roomId, {
+      status: 'closing',
+      closeAt: Date.now() + VOTE.COUNTDOWN_MS,
+    });
+  }
+
+  /** host '취소' — 카운트다운을 멈추고 다시 투표를 연다(open). 이미 취소·마감됐으면 현재 상태 그대로(멱등). */
+  async cancelVoteClose(roomId: string): Promise<VoteStatePayload> {
+    const cur = await this.getVoteState(roomId);
+    if (cur.status !== 'closing') return cur;
+    return this.setVoteState(roomId, { status: 'open', closeAt: null });
+  }
+
+  /**
+   * 카운트다운 종료 → 실제 마감. closing 상태일 때만 집계를 확정한다(취소·중복 호출은 무시 → null).
+   * 결과는 서버가 한 번만 계산해 game:result 로 전원에게 broadcast 된다(모두 같은 결과).
+   */
+  async finalizeVote(roomId: string): Promise<VoteResult | null> {
+    const room = await this.loadRoomOrThrow(roomId);
+    if (room.gameType !== 'vote') {
+      throw new GameError(ERROR_CODES.VALIDATION_ERROR);
+    }
+    const cur = await this.getVoteState(roomId);
+    if (cur.status !== 'closing') return null; // 취소됐거나 이미 마감됨 — 멱등
 
     const items = this.parseItems(room.items);
     if (items.length < GameService.MIN_ITEMS) {
@@ -411,10 +489,10 @@ export class GameService {
 
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'finished');
     await this.saveResult(roomId, result);
-    // host 가 "마감" 을 두 번 눌러도 한 판은 한 판 — finished 로 처음 넘어갈 때만 집계한다.
     if (room.status !== 'finished') {
       await this.stats.incrementPlays();
     }
+    await this.setVoteState(roomId, { status: 'closed', closeAt: null });
 
     return result;
   }

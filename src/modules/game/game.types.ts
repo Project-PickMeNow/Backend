@@ -144,6 +144,21 @@ export interface VoteTallyEntry {
   count: number;
 }
 
+/**
+ * 투표 라이프사이클 상태.
+ *  preparing : 항목 준비 중 — 아직 투표 불가.
+ *  open      : '투표 시작' 후 — 투표 가능.
+ *  closing   : '투표 마감' 후 카운트다운 중 — 취소·재마감 가능(그동안 투표는 계속 가능).
+ *  closed    : 카운트다운 종료 → 결과 확정.
+ */
+export type VoteStatus = 'preparing' | 'open' | 'closing' | 'closed';
+
+/** `vote:state` — 투표 상태가 바뀔 때 전원에게 broadcast. closeAt(마감 시각, epoch ms)은 closing 일 때만. */
+export interface VoteStatePayload {
+  status: VoteStatus;
+  closeAt: number | null;
+}
+
 /** 투표: 집계 + 최다 득표 항목 */
 export interface VoteResult {
   type: 'vote';

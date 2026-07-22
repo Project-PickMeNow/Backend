@@ -1,5 +1,6 @@
 import {
   IsBoolean,
+  IsDateString,
   IsIn,
   IsInt,
   IsNotEmpty,
@@ -57,6 +58,22 @@ export class CreateRoomDto {
     message: '비밀번호는 숫자 최대 6자리여야 합니다.',
   })
   password?: string;
+
+  /**
+   * 방 유효기간 시작 시각(ISO 8601). 이 시각부터 참가자가 입장할 수 있다.
+   * 안 주면 즉시(생성 시각). 형식만 검증하고, start<end·최대 7일 같은 관계 검증은 서비스가 한다.
+   */
+  @IsOptional()
+  @IsDateString({}, { message: 'startAt 은 ISO 8601 날짜여야 합니다.' })
+  startAt?: string;
+
+  /**
+   * 방 유효기간 종료 시각(ISO 8601). 이 시각이 지나면 방이 자동으로 사라진다(Redis 절대 만료).
+   * 안 주면 시작 시각 + 기본 TTL(3일). 시작~종료 최대 7일.
+   */
+  @IsOptional()
+  @IsDateString({}, { message: 'endAt 은 ISO 8601 날짜여야 합니다.' })
+  endAt?: string;
 }
 
 /** POST /api/rooms 응답 data (응답 형태라 interface로 충분) */

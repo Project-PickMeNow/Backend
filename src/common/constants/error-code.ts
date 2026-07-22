@@ -13,6 +13,7 @@ export const ERROR_CODES = {
   PUMP_LIMIT: 'PUMP_LIMIT', // 풍선 — 이번 턴 펌프 상한(MAX_PER_TURN) 도달, 더 못 펌프
   PUMP_FIRST: 'PUMP_FIRST', // 풍선 — 1번도 안 펌프하고 넘기기 시도
   ROOM_LOCKED: 'ROOM_LOCKED', // 게임 진행 중이라 신규 입장 불가
+  ROOM_NOT_STARTED: 'ROOM_NOT_STARTED', // 방 유효기간 시작 전 — 아직 입장할 수 없음
   WRONG_PASSWORD: 'WRONG_PASSWORD', // 비밀방 — 입장 비밀번호가 없거나 틀림
   VOTE_NOT_OPEN: 'VOTE_NOT_OPEN', // 투표가 아직 시작 전(준비 중)이거나 이미 마감돼 투표할 수 없음
   VOTE_NO_VOTES: 'VOTE_NO_VOTES', // 아직 아무도 투표하지 않아 마감할 수 없음

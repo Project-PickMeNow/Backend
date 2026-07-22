@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { RedisService } from '../../infra/redis/redis.service';
@@ -25,6 +29,8 @@ export class RoomService {
   private static readonly ID_LENGTH = 6;
   /** roomId 충돌 시 재시도 횟수 (31^6 ≈ 8.9억이라 실제로 재시도까지 갈 일은 거의 없다) */
   private static readonly ID_MAX_ATTEMPTS = 5;
+  /** 방 유효기간 상한 — 시작~종료 최대 7일. */
+  private static readonly MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
   private readonly ttlSeconds: number;
   private readonly frontendBaseUrl: string;
@@ -66,6 +72,80 @@ export class RoomService {
     return createHash('sha256').update(password).digest('hex');
   }
 
+  /**
+   * 방 유효기간(시작~종료)을 확정하고 검증한다. 값은 epoch ms.
+   *  - startAt 없음 → 지금(즉시 입장 가능). 과거로 주면 지금으로 당긴다.
+   *  - endAt 없음 → 시작 + 기본 TTL(3일) (기존 동작 유지).
+   *  - 규칙: endAt > startAt, endAt > now(이미 만료된 방 생성 금지), (endAt-startAt) ≤ 7일.
+   * 위반 시 VALIDATION_ERROR(400).
+   */
+  private resolveWindow(dto: CreateRoomDto): {
+    startAtMs: number;
+    endAtMs: number;
+  } {
+    const now = Date.now();
+    const parse = (s: string | undefined): number | null => {
+      if (!s) return null;
+      const t = Date.parse(s);
+      return Number.isFinite(t) ? t : null;
+    };
+
+    // 시작: 안 주거나 과거면 지금으로. (과거 시작은 "즉시 시작"과 같다)
+    const rawStart = parse(dto.startAt);
+    const startAtMs = rawStart === null ? now : Math.max(rawStart, now);
+
+    // 종료: 안 주면 시작 + 기본 TTL(3일).
+    const rawEnd = parse(dto.endAt);
+    const endAtMs =
+      rawEnd === null ? startAtMs + this.ttlSeconds * 1000 : rawEnd;
+
+    const invalid = (message: string): never => {
+      throw new BadRequestException({
+        code: ERROR_CODES.VALIDATION_ERROR,
+        message,
+      });
+    };
+
+    if (endAtMs <= startAtMs)
+      invalid('종료 시각은 시작 시각보다 뒤여야 합니다.');
+    if (endAtMs <= now) invalid('종료 시각은 현재보다 뒤여야 합니다.');
+    if (endAtMs - startAtMs > RoomService.MAX_DURATION_MS) {
+      invalid('방 유효기간은 최대 7일입니다.');
+    }
+    return { startAtMs, endAtMs };
+  }
+
+  /** 방의 종료 시각(epoch ms). 없거나 깨지면 null(레거시 방 — 슬라이딩 TTL 로 처리). */
+  private async getEndAtMs(roomId: string): Promise<number | null> {
+    const raw = await this.redis.client.hget(RedisKeys.room(roomId), 'endAt');
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /**
+   * 방 관련 키들에 만료를 적용한다.
+   *  - 종료 시각(endAtMs)이 있으면 절대 만료(pexpireat) — 활동해도 방이 종료 시각을 못 넘긴다.
+   *  - 없으면(레거시) 상대 TTL(expire, 3일) 로 슬라이딩.
+   */
+  private async applyExpiry(
+    keys: string[],
+    endAtMs: number | null,
+  ): Promise<void> {
+    const m = this.redis.client.multi();
+    for (const k of keys) {
+      if (endAtMs !== null) m.pexpireat(k, endAtMs);
+      else m.expire(k, this.ttlSeconds);
+    }
+    await m.exec();
+  }
+
+  /** 방 유효기간 시작 시각(epoch ms). 없으면 0(즉시 시작으로 간주). */
+  async getStartAtMs(roomId: string): Promise<number> {
+    const raw = await this.redis.client.hget(RedisKeys.room(roomId), 'startAt');
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+
   /** 방 생성 (POST /api/rooms) → Redis 저장 + stats.total_rooms +1 */
   async createRoom(dto: CreateRoomDto): Promise<CreateRoomResponse> {
     const roomId = await this.generateUniqueRoomId();
@@ -79,7 +159,11 @@ export class RoomService {
       ? this.hashPassword(dto.password as string)
       : '';
 
-    // hset 과 expire 를 한 번에 보내, TTL 이 안 걸린 방이 남는 창을 없앤다.
+    // 유효기간(시작~종료) 확정·검증. 시작 전엔 참가자 입장이 막히고, 종료 시각이 지나면 방이 사라진다.
+    const { startAtMs, endAtMs } = this.resolveWindow(dto);
+
+    // hset 과 만료를 한 번에 보내, 만료가 안 걸린 방이 남는 창을 없앤다.
+    // expire(상대 TTL) 대신 pexpireat(절대 종료 시각)으로 걸어 "선택한 종료 시각"에 자동 삭제되게 한다.
     await this.redis.client
       .multi()
       .hset(key, {
@@ -91,9 +175,11 @@ export class RoomService {
         maxParticipants: String(this.clampCapacity(dto.maxParticipants)),
         isSecret: isSecret ? '1' : '0',
         joinCodeHash, // 해시(또는 자유방이면 빈 문자열) — 절대 응답으로 내보내지 않는다
+        startAt: String(startAtMs), // epoch ms — 입장 게이트에 쓴다
+        endAt: String(endAtMs), // epoch ms — 절대 만료 시각(pexpireat)
         createdAt: new Date().toISOString(),
       })
-      .expire(key, this.ttlSeconds)
+      .pexpireat(key, endAtMs)
       .exec();
 
     await this.stats.incrementRooms();
@@ -137,7 +223,16 @@ export class RoomService {
       participantCount,
       maxParticipants: this.parseCapacity(room.maxParticipants),
       isSecret: room.isSecret === '1',
+      // 유효기간(epoch ms). 참가자 입장 화면이 "시작 전/유효기간"을 안내하는 데 쓴다.
+      startAt: this.parseMs(room.startAt),
+      endAt: this.parseMs(room.endAt),
     };
+  }
+
+  /** hgetall 로 읽은 문자열 epoch ms 를 숫자로(없거나 깨지면 0). */
+  private parseMs(raw: string | undefined): number {
+    const n = raw === undefined ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : 0;
   }
 
   /**
@@ -240,6 +335,8 @@ export class RoomService {
       status: room.status ?? 'waiting',
       gameType: room.gameType || null,
       isSecret: room.isSecret === '1',
+      startAt: this.parseMs(room.startAt),
+      endAt: this.parseMs(room.endAt),
       items: this.parseItems(room.items),
       participants,
       participantCount: participants.length,
@@ -321,6 +418,7 @@ export class RoomService {
         turnPumps: number;
         turnOrder: string[];
         turnIndex: number;
+        turnDeadline?: number;
         caughtBy: string | null;
       };
       return {
@@ -330,6 +428,8 @@ export class RoomService {
         maxPerTurn: BALLOON.MAX_PER_TURN,
         turnOrder: s.turnOrder ?? [],
         turn: s.caughtBy ? null : (s.turnOrder?.[s.turnIndex] ?? null),
+        // 걸린 뒤엔 카운트다운 없음(null). 진행 중이면 저장된 제한시각으로 복원해 재접속·늦은 입장도 같은 카운트다운을 본다.
+        turnDeadline: s.caughtBy ? null : (s.turnDeadline ?? null),
         caughtBy: s.caughtBy ?? null,
       };
     } catch {
@@ -420,24 +520,30 @@ export class RoomService {
   }
 
   /**
-   * 활동 발생 시 방 관련 키들의 TTL 을 다시 3일로 리셋한다(활발한 방은 안 사라지게).
+   * 활동 발생 시 방 관련 키들의 만료를 다시 적용한다.
+   *  - 유효기간(endAt)이 정해진 방: 항상 그 종료 시각(pexpireat)으로 고정 — 활동해도 종료 시각을 못 넘긴다.
+   *  - 레거시(endAt 없음): 예전처럼 활동마다 3일로 슬라이딩(활발한 방은 안 사라지게).
    * players·onlineRoom·votes 는 room 이 살아있는 동안만 의미가 있어 같은 수명을 준다.
    */
   async touchRoom(roomId: string): Promise<void> {
-    await this.redis.client
-      .multi()
-      .expire(RedisKeys.room(roomId), this.ttlSeconds)
-      .expire(RedisKeys.roomPlayers(roomId), this.ttlSeconds)
-      .expire(RedisKeys.roomReady(roomId), this.ttlSeconds)
-      .expire(RedisKeys.onlineRoom(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameVotes(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameVoteState(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameLadder(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameLadderRevealed(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameDraw(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameDrawPicks(roomId), this.ttlSeconds)
-      .expire(RedisKeys.gameBalloon(roomId), this.ttlSeconds)
-      .exec();
+    const endAtMs = await this.getEndAtMs(roomId);
+    await this.applyExpiry(
+      [
+        RedisKeys.room(roomId),
+        RedisKeys.roomPlayers(roomId),
+        RedisKeys.roomReady(roomId),
+        RedisKeys.onlineRoom(roomId),
+        RedisKeys.gameResult(roomId),
+        RedisKeys.gameVotes(roomId),
+        RedisKeys.gameVoteState(roomId),
+        RedisKeys.gameLadder(roomId),
+        RedisKeys.gameLadderRevealed(roomId),
+        RedisKeys.gameDraw(roomId),
+        RedisKeys.gameDrawPicks(roomId),
+        RedisKeys.gameBalloon(roomId),
+      ],
+      endAtMs,
+    );
   }
 
   /** 참가자 퇴장 — players Set 에서 제거(다음 게임 준비 목록에서도 함께 제거). */

@@ -137,6 +137,21 @@ export class RoomGateway
       if (!ok) return this.fail(client, ERROR_CODES.WRONG_PASSWORD);
     }
 
+    // 방 유효기간 시작 전에는 신규 참가자 입장을 막는다(호스트는 미리 준비할 수 있어 예외).
+    // 이미 이 방의 멤버(재접속)도 통과. startAt=0(레거시·즉시 시작)이면 항상 통과.
+    if (client.data.role !== 'host') {
+      const startAtMs = await this.roomService.getStartAtMs(roomId);
+      if (startAtMs > Date.now()) {
+        const alreadyMember = await this.roomService.isParticipant(
+          roomId,
+          nickname,
+        );
+        if (!alreadyMember) {
+          return this.fail(client, ERROR_CODES.ROOM_NOT_STARTED);
+        }
+      }
+    }
+
     // 게임 진행 중(대기 상태가 아님)에는 신규 참가자 입장을 막는다.
     // 단, 이미 이 방의 멤버였던 사람(새로고침·재접속)은 그대로 다시 들어올 수 있어야 한다.
     const status = await this.roomService.getStatus(roomId);

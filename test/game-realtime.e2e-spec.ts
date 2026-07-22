@@ -468,16 +468,18 @@ describe('GameGateway 게임 관통 (e2e)', () => {
       turnOrder: string[];
       turn: string;
       maxPerTurn: number;
+      turnDeadline: number;
     };
     type Pumped = {
       by: string;
       pumps: number;
       turnPumps: number;
       turn: string | null;
+      turnDeadline: number | null;
       caughtBy: string | null;
       burst: boolean;
     };
-    type Passed = { by: string; turn: string };
+    type Passed = { by: string; turn: string; turnDeadline: number };
 
     it('참가자가 없으면(호스트만) 시작할 수 없다 (NEED_MORE_PLAYERS)', async () => {
       const { host, guest } = await setupGame('balloon');
@@ -526,7 +528,10 @@ describe('GameGateway 게임 관통 (e2e)', () => {
         expect([...s.turnOrder].sort()).toEqual(['A', 'B', '호스트']);
         expect(s.turn).toBe(s.turnOrder[0]);
         expect(s.maxPerTurn).toBe(3);
-        expect(s.capacity).toBe(30);
+        // 총 펌프(풍선 크기)는 서버가 인원수 × 3 × 3 으로 정한다(호스트 포함 3명 → 27).
+        expect(s.capacity).toBe(s.turnOrder.length * 3 * 3);
+        // 첫 턴 제한시각(60초 뒤)이 미래로 내려온다.
+        expect(s.turnDeadline).toBeGreaterThan(Date.now());
 
         let turn = s.turn;
         let caught: string | null = null;
@@ -581,7 +586,7 @@ describe('GameGateway 게임 관통 (e2e)', () => {
           }
         }
         expect(s.turnOrder).toContain(caught); // 호스트 포함 누군가 걸렸다
-        expect(totalPumps).toBeLessThanOrEqual(30); // capacity 안에서 반드시 터진다
+        expect(totalPumps).toBeLessThanOrEqual(s.capacity); // capacity 안에서 반드시 터진다
       } finally {
         host.disconnect();
         guest.disconnect();

@@ -673,6 +673,46 @@ describe('GameGateway 게임 관통 (e2e)', () => {
         guest.disconnect();
       }
     });
+
+    // 회귀: 안 터진 풍선을 남긴 채(방 복귀 없이) 새 라운드를 시작하면, game:begin 이 이전 풍선을
+    // 지워 다시 시작할 수 있어야 한다. 안 그러면 startBalloon 이 GAME_RUNNING 으로 거절돼
+    // 호스트가 balloon:started 를 못 받고 "게임을 시작하는 중…"에 갇힌다.
+    it('game:begin 이 이전 라운드의 미완료 풍선을 지워 다시 시작할 수 있다', async () => {
+      const { roomId, host, guest } = await setupGame('balloon');
+      const p2 = connect(roomId);
+      try {
+        await guest.emitWithAck('room:join', { nickname: 'A' });
+        await p2.emitWithAck('room:join', { nickname: 'B' });
+
+        // 1라운드 시작 — 아무도 안 걸린 채(caughtBy===null) 진행 중 상태로 둔다.
+        const started1 = once<Started>(host, 'balloon:started');
+        expect(await host.emitWithAck('balloon:start', {})).toEqual({
+          ok: true,
+        });
+        await started1;
+
+        // 방 복귀 없이 바로 재시작하면 진행 중이라 거절된다(기준선).
+        expect(await host.emitWithAck('balloon:start', {})).toEqual({
+          ok: false,
+          code: 'GAME_RUNNING',
+        });
+
+        // 새 라운드 게이트 — game:begin 이 이전 풍선을 지운다.
+        expect(await host.emitWithAck('game:begin')).toEqual({ ok: true });
+
+        // 이제 새 풍선 게임이 정상 시작돼 balloon:started 가 전원에게 전달된다.
+        const started2 = once<Started>(host, 'balloon:started');
+        expect(await host.emitWithAck('balloon:start', {})).toEqual({
+          ok: true,
+        });
+        const s2 = await started2;
+        expect([...s2.turnOrder].sort()).toEqual(['A', 'B', '호스트']);
+      } finally {
+        host.disconnect();
+        guest.disconnect();
+        p2.disconnect();
+      }
+    });
   });
 
   // ── 새 게임 시작 게이트: 이전 게임 참가자가 전부 방으로 돌아오거나(room:ready) 나가야 시작 가능 ──

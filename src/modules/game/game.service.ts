@@ -177,6 +177,11 @@ export class GameService {
     }
     // 새 라운드 시작 — 준비 목록을 비워 이번 게임 종료 후의 복귀를 새로 센다.
     await this.rooms.clearReady(roomId);
+    // 이전 라운드의 게임 상태(결과·투표·사다리·제비·풍선)를 지워 새 게임이 잔여 상태에 막히지 않게 한다.
+    // 특히 풍선은 아직 안 터진(caughtBy===null) 상태가 남아 있으면 startBalloon 이 GAME_RUNNING 으로
+    // 거절돼, 호스트가 balloon:started 를 못 받고 "게임을 시작하는 중…"에 갇힌다(프론트가 GAME_RUNNING
+    // 을 무시하기 때문). game:begin 시 서버에서 리셋해 프론트 resetRound 와 대칭을 이룬다.
+    await this.clearRoundState(roomId);
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'playing');
     await this.rooms.touchRoom(roomId);
     return room.gameType;
@@ -218,9 +223,11 @@ export class GameService {
     return { gameType, result, items };
   }
 
-  /** 한 판 더 — 결과·투표·사다리를 지우고 대기 상태로 되돌린다. */
-  async resetGame(roomId: string): Promise<void> {
-    await this.loadRoomOrThrow(roomId);
+  /**
+   * 라운드별 게임 상태(결과·투표·사다리·제비·풍선)를 모두 지운다.
+   * 방/항목은 건드리지 않는다 — 새 라운드 시작(beginGame)과 방 복귀(resetGame) 공용.
+   */
+  private async clearRoundState(roomId: string): Promise<void> {
     await this.redis.client.del(
       RedisKeys.gameResult(roomId),
       RedisKeys.gameVotes(roomId),
@@ -231,6 +238,12 @@ export class GameService {
       RedisKeys.gameDrawPicks(roomId),
       RedisKeys.gameBalloon(roomId),
     );
+  }
+
+  /** 한 판 더 — 결과·투표·사다리를 지우고 대기 상태로 되돌린다. */
+  async resetGame(roomId: string): Promise<void> {
+    await this.loadRoomOrThrow(roomId);
+    await this.clearRoundState(roomId);
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
   }
 
@@ -580,7 +593,9 @@ export class GameService {
     const c = Math.min(DRAW.MAX, Math.max(DRAW.MIN, Math.floor(count)));
 
     // 제비 수가 참가자 수보다 적으면 게임을 시작하지 않는다(모든 참가자가 1인 1제비를 뽑아야 하므로).
-    const players = await this.redis.client.scard(RedisKeys.roomPlayers(roomId));
+    const players = await this.redis.client.scard(
+      RedisKeys.roomPlayers(roomId),
+    );
     if (c < players) throw new GameError(ERROR_CODES.NOT_ENOUGH_STICKS);
 
     // 꽝은 최소 1개, 최대 c-1개(전부 꽝이면 뽑을 이유가 없다).

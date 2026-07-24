@@ -33,10 +33,12 @@ export function configureApp(app: INestApplication): void {
     app.use((req: Request, res: Response, next: NextFunction) => {
       const stop = metrics.httpDuration.startTimer();
       res.on('finish', () => {
-        const route = req.route?.path ?? 'unmatched';
+        // req.route 는 Express 타입상 any 라, path 만 안전하게 뽑아 string 으로 확정한다.
+        const route =
+          (req.route as { path?: string } | undefined)?.path ?? 'unmatched';
         const labels = {
           method: req.method,
-          route: typeof route === 'string' ? route : String(route),
+          route,
           status: String(res.statusCode),
         };
         stop(labels);

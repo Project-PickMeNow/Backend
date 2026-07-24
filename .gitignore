@@ -1,5 +1,6 @@
-# Logs
-logs
+# Logs — 디렉터리는 유지(Promtail 마운트 대상), 로그 파일만 무시
+logs/*
+!logs/.gitkeep
 *.log
 npm-debug.log*
 yarn-debug.log*

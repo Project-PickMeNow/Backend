@@ -1,0 +1,19 @@
+# Grafana 데이터소스 자동 프로비저닝 — 부팅 시 Prometheus·Loki 를 연결한다.
+# uid 를 고정해 두어야 대시보드 JSON 이 데이터소스를 확실히 참조할 수 있다.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true

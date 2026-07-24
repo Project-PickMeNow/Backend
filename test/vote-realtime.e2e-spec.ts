@@ -236,15 +236,16 @@ describe('투표 관통 (e2e)', () => {
       await g1.emitWithAck('vote:cast', { itemId: items[0].id });
       await g2.emitWithAck('vote:cast', { itemId: items[1].id });
 
-      const hostResult = once<{ result: { winner: Item; tally: TallyEntry[] } }>(
-        host,
-        'game:result',
-      );
+      const hostResult = once<{
+        result: { winner: Item; tally: TallyEntry[] };
+      }>(host, 'game:result');
       await host.emitWithAck('vote:close', {});
       await host.emitWithAck('vote:finalize');
       const h = await hostResult;
       expect(h.result.winner).toEqual(items[0]); // 짜장 — 호스트 표로 2표 승리
-      expect(h.result.tally.find((t) => t.item.id === items[0].id)!.count).toBe(2);
+      expect(h.result.tally.find((t) => t.item.id === items[0].id)!.count).toBe(
+        2,
+      );
     } finally {
       [host, g1, g2].forEach((s) => s.disconnect());
     }

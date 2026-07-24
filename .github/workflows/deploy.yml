@@ -75,7 +75,8 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
           # Caddy(리버스 프록시)가 Caddyfile 을 읽으므로 compose 와 함께 복사한다.
-          source: "docker-compose.prod.yml,Caddyfile"
+          # 관측 스택(모니터링 compose + monitoring/ 설정 디렉터리)도 함께 복사한다.
+          source: "docker-compose.prod.yml,docker-compose.monitoring.prod.yml,Caddyfile,monitoring"
           target: "~/app"
 
       - name: EC2 배포
@@ -94,5 +95,9 @@ jobs:
             echo "DOCKER_IMAGE=${IMAGE}" >> .env
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d
+            # 관측 스택(Grafana/Prometheus/Loki/Promtail) — prod 가 만든 네트워크·로그 볼륨을 공유한다.
+            # GRAFANA_ADMIN_PASSWORD 가 .env 에 없으면 이 단계만 건너뛰고 앱 배포는 계속한다.
+            docker compose -f docker-compose.monitoring.prod.yml up -d \
+              || echo "⚠️ 모니터링 스택 기동 실패(GRAFANA_ADMIN_PASSWORD 확인). 앱 배포는 정상."
             docker image prune -f
             echo "✅ Deploy done: ${IMAGE}"

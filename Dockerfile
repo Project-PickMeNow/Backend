@@ -52,6 +52,11 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+# 로그 디렉터리를 미리 만들고 node 소유로 둔다 — 비-root(node)로 실행해도 파일 로깅
+# (logs/app.log)이 되게 하고, 프로덕션에서 이 경로에 마운트되는 로그 볼륨(app_logs)이
+# 빈 볼륨 초기화 시 node 소유권을 물려받게 한다(Promtail 이 읽는 로그의 출처).
+RUN mkdir -p /app/logs && chown -R node:node /app/logs
+
 # 루트로 실행하지 않는다(node:20-slim 이 제공하는 비-root 사용자). 파일은 world-readable 이라
 # migrate deploy·앱 실행에 문제없다.
 USER node

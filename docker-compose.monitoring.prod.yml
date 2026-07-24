@@ -1,0 +1,86 @@
+# 프로덕션 관측(Observability) 스택 — 배포된(EC2) 서비스를 모니터링한다.
+# Grafana + Prometheus + Loki(+ Promtail). 로컬용(docker-compose.monitoring.yml)과 달리
+# prod 스택과 같은 네트워크·로그 볼륨을 공유해 실제 운영 앱을 관측한다.
+#
+# ── 전제 ──
+#   docker-compose.prod.yml 이 먼저 떠 있어야 한다(네트워크 pickmenow-prod 와
+#   로그 볼륨 pickmenow_app_logs 를 prod 가 만든다 — 여기선 external 로 참조).
+#
+# ── 실행 (EC2, prod 와 같은 ~/app 디렉터리) ──
+#   docker compose -f docker-compose.prod.yml up -d                # 1) 먼저 prod
+#   docker compose -f docker-compose.monitoring.prod.yml up -d     # 2) 그다음 모니터링
+#
+# ── 접근 ──
+#   - Grafana    : 127.0.0.1:3002 (외부 비공개) → SSH 터널로 접속
+#                    ssh -L 3002:localhost:3002 <ec2>   후  http://localhost:3002
+#                    로그인: admin / $GRAFANA_ADMIN_PASSWORD (.env)
+#   - Prometheus/Loki : 외부로 노출하지 않음(내부 네트워크 전용). 필요 시 터널로 접근.
+name: pickmenow-monitoring-prod
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pickmenow-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./monitoring/prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: pickmenow-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    container_name: pickmenow-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      # prod app 컨테이너가 /app/logs 에 남기는 JSON 로그(app_logs 볼륨)를 읽는다.
+      - app_logs:/var/log/app:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: pickmenow-grafana
+    # 외부에 공개하지 않는다 — 127.0.0.1 바인딩이라 EC2 보안그룹과 무관하게 SSH 터널로만 접속된다.
+    ports:
+      - '127.0.0.1:3002:3000'
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # 비밀번호는 .env 에서 주입(필수). 안 넣으면 컨테이너가 뜨지 않는다.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD 를 .env 에 설정하세요}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  grafana_data:
+  # prod 스택이 만든 앱 로그 볼륨을 그대로 참조한다(docker-compose.prod.yml 에서 생성).
+  app_logs:
+    name: pickmenow_app_logs
+    external: true
+
+networks:
+  # prod 스택의 네트워크에 합류한다(app 컨테이너를 서비스명으로 스크랩하기 위함).
+  default:
+    name: pickmenow-prod
+    external: true

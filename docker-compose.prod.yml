@@ -38,6 +38,10 @@ services:
     # 외부로 포트를 직접 노출하지 않는다 — Caddy 가 compose 내부망에서 app:3000 으로 프록시한다.
     expose:
       - '3000'
+    volumes:
+      # 앱 로그(/app/logs/app.log)를 볼륨에 남겨 모니터링 스택의 Promtail 이 읽게 한다.
+      # (docker-compose.monitoring.prod.yml 이 이 볼륨을 external 로 참조한다.)
+      - app_logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,3 +77,12 @@ volumes:
   redis_data:
   caddy_data:
   caddy_config:
+  # 앱 로그 볼륨 — 모니터링 스택(Promtail)이 external 로 공유해 읽는다. 이름을 고정한다.
+  app_logs:
+    name: pickmenow_app_logs
+
+networks:
+  # 네트워크 이름을 고정해, 모니터링 스택(docker-compose.monitoring.prod.yml)이
+  # external 로 이 네트워크에 합류할 수 있게 한다.
+  default:
+    name: pickmenow-prod

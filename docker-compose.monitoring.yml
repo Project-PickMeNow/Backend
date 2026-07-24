@@ -1,0 +1,75 @@
+# 관측성(Observability) 스택 — Grafana + Prometheus + Loki(+ Promtail).
+#
+# 실행:
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# 전제: 앱이 호스트에서 실행 중이고(npm run start:dev) /api/metrics 를 노출한다.
+#   - Prometheus  : http://localhost:9090  (앱 지표 스크랩)
+#   - Grafana     : http://localhost:3002  (admin / admin) — 대시보드
+#   - Loki        : http://localhost:3100  (로그 저장, Grafana 에서 조회)
+#   - Promtail    : ./logs/app.log 를 tail → Loki 로 전송
+#
+# 앱이 컨테이너가 아니라 호스트에서 돌기 때문에 Prometheus 는 host.docker.internal 로 접근한다.
+# (Docker Desktop 은 기본 지원, Linux 는 아래 extra_hosts 의 host-gateway 로 매핑)
+name: pickmenow-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pickmenow-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: pickmenow-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - '3100:3100'
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    container_name: pickmenow-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - ./logs:/var/log/app:ro # 앱이 남기는 JSON 로그를 읽는다
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: pickmenow-grafana
+    ports:
+      - '3002:3000' # 앱이 3000/3001 을 쓰므로 Grafana 는 호스트 3002 로 매핑(충돌 방지)
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  grafana_data:

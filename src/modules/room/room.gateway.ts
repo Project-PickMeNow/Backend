@@ -259,6 +259,43 @@ export class RoomGateway
   }
 
   /**
+   * host 참가자 강퇴 — 대기(waiting)로 멈춰 게임 시작을 막는 참가자 등을 호스트가 직접 내보낸다.
+   * 참가자·ready 목록에서 즉시 빼고(유예 타이머도 정리), 대상 소켓엔 room:kicked 를 보내 홈으로
+   * 돌려보낸 뒤 연결을 끊는다. 호스트만 호출할 수 있다.
+   */
+  @SubscribeMessage('room:kick')
+  async handleKick(
+    client: AppSocket,
+    payload: { nickname?: string },
+  ): Promise<{ ok: true } | { ok: false; code: string }> {
+    const { roomId, role } = client.data;
+    if (!roomId) return this.fail(client, ERROR_CODES.ROOM_NOT_FOUND);
+    if (role !== 'host') return this.fail(client, ERROR_CODES.NOT_HOST);
+    const nickname = payload?.nickname?.trim();
+    if (!nickname) return this.fail(client, ERROR_CODES.VALIDATION_ERROR);
+
+    // 걸려 있던 유예 제거 타이머 정리 후 즉시 제거하고, 바뀐 명단·준비 목록을 방 전원에게 알린다.
+    this.clearPendingLeave(roomId, nickname);
+    const { participants, participantCount } =
+      await this.roomService.removeParticipant(roomId, nickname);
+    this.server
+      .to(roomId)
+      .emit('participant:left', { nickname, participants, participantCount });
+    await this.emitReady(roomId);
+
+    // 강퇴된 참가자의 살아있는 소켓들에 알리고 내보낸다(닉네임으로 찾는다).
+    const sockets = await this.server.in(roomId).fetchSockets();
+    for (const s of sockets) {
+      if ((s.data as AppSocket['data'])?.nickname === nickname) {
+        (s.data as AppSocket['data']).nickname = undefined;
+        s.emit('room:kicked', { roomId });
+        s.disconnect(true);
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
    * 대기 중 끊긴 참가자를 유예 시간 뒤에 제거하도록 예약한다.
    * 같은 (방·닉네임) 예약이 이미 있으면 새로 건다. 유예 안에 재접속하면 handleJoin 이 취소한다.
    * 서버 재시작 시 타이머는 사라지지만, 그땐 클라이언트가 재접속하며 재-join 하므로 슬롯은 유지된다.

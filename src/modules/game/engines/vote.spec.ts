@@ -31,10 +31,21 @@ describe('VoteEngine', () => {
       expect(result.winner).toEqual(items[1]);
     });
 
-    it('동점이면 항목 순서상 먼저인 것이 이긴다(결정적)', () => {
-      // a 와 b 가 각 1표 동점 → 앞선 a 가 winner
+    it('동점이면 항목 순서상 먼저인 것이 winner 대표값(결정적)', () => {
+      // a 와 b 가 각 1표 동점 → 앞선 a 가 winner(하위호환 대표값)
       const result = engine.close(items, ['a', 'b']);
       expect(result.winner).toEqual(items[0]);
+    });
+
+    it('동점이면 winners 에 공동 1위가 모두 담긴다', () => {
+      // a 와 b 가 각 1표 동점 → winners = [a, b]
+      const result = engine.close(items, ['a', 'b']);
+      expect(result.winners).toEqual([items[0], items[1]]);
+    });
+
+    it('단독 1위면 winners 는 그 항목 하나만', () => {
+      const result = engine.close(items, ['b', 'b', 'a']);
+      expect(result.winners).toEqual([items[1]]);
     });
 
     it('아무도 투표 안 했으면 첫 항목이 winner(결정적)', () => {

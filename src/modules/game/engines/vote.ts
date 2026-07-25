@@ -20,8 +20,9 @@ export class VoteEngine {
   }
 
   /**
-   * 마감 결과 — 집계 + 최다 득표 항목.
-   * 동점이면 항목 순서상 먼저인 것이 이긴다(결정적). 득표가 0 이어도 첫 항목이 winner 가 된다.
+   * 마감 결과 — 집계 + 최다 득표 항목(들).
+   * 동점이면 최다 득표한 항목이 여럿이므로 winners 에 모두 담아 공동 1위를 표현한다(항목 순서 유지).
+   * winner 는 하위호환용 대표값(winners[0]). 득표가 0 이어도 최소 첫 항목이 winner 가 된다.
    */
   close(items: Item[], choices: string[]): VoteResult {
     if (items.length === 0) {
@@ -29,10 +30,12 @@ export class VoteEngine {
       throw new Error('투표 마감에 항목이 최소 1개는 필요합니다.');
     }
     const tally = this.tally(items, choices);
-    // reduce 로 최댓값을 찾되, 앞선 항목을 우선(>= 가 아니라 > 로 갱신)해 동점 시 순서를 지킨다.
-    const winner = tally.reduce((best, cur) =>
-      cur.count > best.count ? cur : best,
-    ).item;
-    return { type: 'vote', tally, winner };
+    const maxCount = tally.reduce((m, t) => Math.max(m, t.count), 0);
+    // 최다 득표(동점 포함) 전원. 득표가 0 이면(아무도 투표 안 함) 첫 항목만 대표로 둔다.
+    const winners =
+      maxCount > 0
+        ? tally.filter((t) => t.count === maxCount).map((t) => t.item)
+        : [tally[0].item];
+    return { type: 'vote', tally, winner: winners[0], winners };
   }
 }

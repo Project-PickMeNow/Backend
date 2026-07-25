@@ -541,8 +541,25 @@ export class RoomService {
         RedisKeys.gameDraw(roomId),
         RedisKeys.gameDrawPicks(roomId),
         RedisKeys.gameBalloon(roomId),
+        RedisKeys.roomKicked(roomId),
       ],
       endAtMs,
+    );
+  }
+
+  /** 강퇴 명단에 추가한다 — 이 방에서 이 닉네임의 재입장을 막는다(방 수명 동안 유지). */
+  async banKicked(roomId: string, nickname: string): Promise<void> {
+    await this.redis.client.sadd(RedisKeys.roomKicked(roomId), nickname);
+    await this.touchRoom(roomId); // 강퇴 명단도 방과 같은 수명으로 만료된다
+  }
+
+  /** 이 닉네임이 이 방에서 강퇴된 상태인지. */
+  async isKicked(roomId: string, nickname: string): Promise<boolean> {
+    return (
+      (await this.redis.client.sismember(
+        RedisKeys.roomKicked(roomId),
+        nickname,
+      )) === 1
     );
   }
 
@@ -628,6 +645,7 @@ export class RoomService {
       RedisKeys.gameDraw(roomId),
       RedisKeys.gameDrawPicks(roomId),
       RedisKeys.gameBalloon(roomId),
+      RedisKeys.roomKicked(roomId),
     );
   }
 

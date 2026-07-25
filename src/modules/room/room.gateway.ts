@@ -119,6 +119,15 @@ export class RoomGateway
       return this.fail(client, ERROR_CODES.NICKNAME_TAKEN);
     }
 
+    // 강퇴된 참가자는 소켓이 자동 재연결하며 다시 room:join 을 보내도 재입장을 막는다.
+    // (host 는 강퇴 대상이 아니므로 검사에서 제외.) 이 검사가 없으면 disconnect 후 곧바로 되살아난다.
+    if (
+      client.data.role !== 'host' &&
+      (await this.roomService.isKicked(roomId, nickname))
+    ) {
+      return this.fail(client, ERROR_CODES.KICKED);
+    }
+
     // 이 닉네임으로 들어오려는 시도 자체가 '아직 방에 있음'의 신호다 — 대기 중 끊김으로
     // 잡혀 있던 유예 제거 타이머가 있으면 취소한다(재접속으로 튕겨 나가지 않게).
     this.clearPendingLeave(roomId, nickname);
@@ -276,6 +285,9 @@ export class RoomGateway
 
     // 걸려 있던 유예 제거 타이머 정리 후 즉시 제거하고, 바뀐 명단·준비 목록을 방 전원에게 알린다.
     this.clearPendingLeave(roomId, nickname);
+    // 강퇴 명단에 올린다 — 소켓을 끊어도 클라이언트가 자동 재연결하며 room:join 으로 되살아나므로,
+    // 서버가 이 닉네임의 재입장을 막아야 강퇴가 실제로 유지된다(handleJoin 에서 검사).
+    await this.roomService.banKicked(roomId, nickname);
     const { participants, participantCount } =
       await this.roomService.removeParticipant(roomId, nickname);
     this.server

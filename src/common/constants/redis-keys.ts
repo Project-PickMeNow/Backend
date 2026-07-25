@@ -18,6 +18,9 @@ export const RedisKeys = {
    */
   roomReady: (roomId: string) => `room:${roomId}:ready`,
 
+  /** 강퇴된 참가자 (Set) — 닉네임. 호스트가 내보낸 사람은 자동 재연결로 되살아나지 못하게 재입장을 막는다. */
+  roomKicked: (roomId: string) => `room:${roomId}:kicked`,
+
   /** 게임 결과 (String, JSON) */
   gameResult: (roomId: string) => `game:${roomId}:result`,
 

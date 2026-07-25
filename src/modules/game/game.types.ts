@@ -172,13 +172,15 @@ export type VoteStatus = 'preparing' | 'open' | 'closing' | 'closed';
 export interface VoteStatePayload {
   status: VoteStatus;
   closeAt: number | null;
+  auto?: boolean; // closing 이 '전원 투표' 자동 마감이면 true(수동 마감은 없음/false) — 안내 문구 구분용
 }
 
 /** 투표: 집계 + 최다 득표 항목 */
 export interface VoteResult {
   type: 'vote';
   tally: VoteTallyEntry[]; // 항목 순서대로, 득표 0 인 항목도 포함
-  winner: Item; // 최다 득표(동점이면 항목 순서상 먼저)
+  winner: Item; // 최다 득표 대표값(하위호환) — winners[0] 과 같다
+  winners: Item[]; // 최다 득표 전원(동점이면 공동 1위로 여럿)
 }
 
 /**

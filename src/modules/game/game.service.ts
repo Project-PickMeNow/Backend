@@ -445,7 +445,7 @@ export class GameService {
     try {
       const s = JSON.parse(raw) as Partial<VoteStatePayload>;
       const status = s.status ?? 'preparing';
-      return { status, closeAt: s.closeAt ?? null };
+      return { status, closeAt: s.closeAt ?? null, auto: s.auto ?? false };
     } catch {
       return { status: 'preparing', closeAt: null };
     }
@@ -495,6 +495,30 @@ export class GameService {
     return this.setVoteState(roomId, {
       status: 'closing',
       closeAt: Date.now() + VOTE.COUNTDOWN_MS,
+    });
+  }
+
+  /**
+   * 전원 투표 시 자동 마감 — open 상태에서 투표 수가 참여자 수 이상이면 10초 카운트다운(closing)을 시작한다.
+   * host 수동 마감과 같은 closing 이지만 auto=true 로 표시해 프론트가 안내 문구를 바꾼다. closing 은
+   * host 가 여전히 취소(cancelVoteClose)할 수 있다. 상태가 바뀌면 새 상태, 이미 open 이 아니거나
+   * 아직 전원이 투표하지 않았으면 null(브로드캐스트 불필요).
+   *
+   * 투표 수(gameVotes hlen)에는 호스트 표도 포함될 수 있어, 참여자 전원 투표 전에도 트리거될 수 있다.
+   * 다만 closing 은 취소 가능하고 카운트다운이 10초라 무해하다(조기 마감이면 host 가 취소).
+   */
+  async maybeAutoCloseVote(roomId: string): Promise<VoteStatePayload | null> {
+    const cur = await this.getVoteState(roomId);
+    if (cur.status !== 'open') return null;
+    const [votes, players] = await Promise.all([
+      this.redis.client.hlen(RedisKeys.gameVotes(roomId)),
+      this.redis.client.scard(RedisKeys.roomPlayers(roomId)),
+    ]);
+    if (players < 1 || votes < players) return null;
+    return this.setVoteState(roomId, {
+      status: 'closing',
+      closeAt: Date.now() + VOTE.COUNTDOWN_MS,
+      auto: true,
     });
   }
 

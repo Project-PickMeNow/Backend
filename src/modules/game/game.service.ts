@@ -540,6 +540,12 @@ export class GameService {
       throw new GameError(ERROR_CODES.VALIDATION_ERROR);
     }
     const cur = await this.getVoteState(roomId);
+    // 이미 마감 카운트다운 중이면(전원 투표 자동 마감 or 수동 재클릭) 멱등하게 현재 상태를 돌려준다 —
+    // 이미 돌고 있는 카운트다운을 다시 시작하거나 오류로 막지 않는다. 프론트는 closing 이면 '취소'만
+    // 노출하지만, 자동 마감과 수동 클릭이 겹치는 순간엔 vote:close 가 도착할 수 있어 이렇게 흡수한다.
+    if (cur.status === 'closing') {
+      return cur;
+    }
     if (cur.status !== 'open') {
       throw new GameError(ERROR_CODES.VOTE_NOT_OPEN);
     }

@@ -1,6 +1,6 @@
 /**
  * 방 정원 정책 (한곳에서 관리).
- * 정원은 선택된 게임 종류로 정해진다 — 투표하기는 50명, 나머지 게임은 12명.
+ * 정원은 선택된 게임 종류로 정해진다 — 현재는 모든 게임 50명(투표 포함).
  * game:select 때 capacityForGame 으로 방의 maxParticipants 를 갱신한다.
  */
 export const ROOM_CAPACITY = {
@@ -16,7 +16,7 @@ export const ROOM_CAPACITY = {
   GAME: 50,
 } as const;
 
-/** 게임 종류별 정원 — 투표만 50, 나머지(미선택 포함)는 12. */
+/** 게임 종류별 정원 — 현재는 투표·그 외(미선택 포함) 모두 50. */
 export function capacityForGame(gameType: string | null | undefined): number {
   return gameType === 'vote' ? ROOM_CAPACITY.VOTE : ROOM_CAPACITY.GAME;
 }

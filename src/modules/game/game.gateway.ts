@@ -125,8 +125,31 @@ export class GameGateway implements OnGatewayDisconnect {
    * 전원이 같은 시각(startAt)으로 3초 카운트다운을 함께 보도록 startAt(epoch ms)을 실어 보낸다.
    */
   @SubscribeMessage('game:begin')
-  async handleGameBegin(client: AppSocket): Promise<Ack> {
+  async handleGameBegin(
+    client: AppSocket,
+    payload?: { force?: boolean },
+  ): Promise<Ack> {
     return this.hostAction(client, async (roomId) => {
+      // 게임 시작 직전, 지금 이 방에 실제로 붙어 있는 참가자만 확정한다 — 창을 닫아 소켓이 끊긴
+      // 유령(대기 유예로 명단에 남아 있던)을 빼서 게임(풍선 순번·제비 기본값 등)에 안 섞이게 한다.
+      const live = await this.connectedNicknames(roomId);
+      const pruned = await this.gameService.pruneDisconnected(roomId, live);
+      this.emitLeft(roomId, pruned);
+
+      // force=true — 아직 로비로 안 돌아온 참가자가 있어도 무시하고 시작한다. 그들은 명단에서 빼고
+      // '접속이 늦어 이번 게임에 참여하지 못했다'는 안내(game:missed)를 보내 다음 게임을 기다리게 한다.
+      if (payload?.force) {
+        const missed = await this.gameService.dropNotReady(roomId);
+        if (missed.removed.length > 0) {
+          const sockets = await this.server.in(roomId).fetchSockets();
+          for (const s of sockets) {
+            const nick = (s.data as AppSocket['data'])?.nickname;
+            if (nick && missed.removed.includes(nick)) s.emit('game:missed');
+          }
+          this.emitLeft(roomId, missed);
+        }
+      }
+
       const gameType = await this.gameService.beginGame(roomId);
       // 전원이 같은 시각에 게임이 열리도록 절대 시각을 공유한다(각자 로컬 시계로 카운트다운).
       const startAt = Date.now() + GameGateway.BEGIN_COUNTDOWN_MS;
@@ -134,6 +157,28 @@ export class GameGateway implements OnGatewayDisconnect {
       // 새 라운드 — 서버가 준비 목록을 비웠음을 전원에 반영(다음 게임 종료 후의 복귀를 새로 센다).
       this.server.to(roomId).emit('room:readyUpdate', { ready: [] });
     });
+  }
+
+  /** 지금 이 방에 붙어 있는 소켓들의 참가자 닉네임(호스트는 닉네임이 없어 제외된다). */
+  private async connectedNicknames(roomId: string): Promise<string[]> {
+    const sockets = await this.server.in(roomId).fetchSockets();
+    return sockets
+      .map((s) => (s.data as AppSocket['data'])?.nickname)
+      .filter((n): n is string => !!n);
+  }
+
+  /** 제거된 참가자마다 participant:left 를 방 전원에게 알린다(최종 명단·인원수 동봉). */
+  private emitLeft(
+    roomId: string,
+    r: { removed: string[]; participants: string[]; participantCount: number },
+  ): void {
+    for (const nickname of r.removed) {
+      this.server.to(roomId).emit('participant:left', {
+        nickname,
+        participants: r.participants,
+        participantCount: r.participantCount,
+      });
+    }
   }
 
   @SubscribeMessage('game:start')

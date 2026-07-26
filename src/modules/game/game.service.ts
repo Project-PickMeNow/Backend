@@ -159,6 +159,61 @@ export class GameService {
   }
 
   /**
+   * 게임 시작 직전, '연결이 살아 있는' 참가자만 남기고 나머지(창을 닫아 소켓이 끊긴 유령)를 명단에서 뺀다.
+   * connectedNicknames 는 게이트웨이가 fetchSockets 로 모은, 지금 이 방에 실제로 붙어 있는 닉네임들이다.
+   *
+   * 왜 필요한가: 대기 중 끊김은 5분(WAITING_LEAVE_GRACE_MS) 유예로 슬롯을 남겨 재접속(reclaim)을
+   * 허용하는데, 그 사이 게임을 시작하면 창을 닫고 나간 유령이 players·ready 에 남아 게임(풍선 순번 등)에
+   * 그대로 포함됐다. 게임 시작 시점엔 재접속 유예를 접고 '지금 붙어 있는 사람'만 참가로 확정한다.
+   * 제거된 유령은 participant:left 로 방 전원에게 알려 명단·인원수(제비 기본값 등)가 실제와 맞게 한다.
+   */
+  async pruneDisconnected(
+    roomId: string,
+    connectedNicknames: string[],
+  ): Promise<{
+    removed: string[];
+    participants: string[];
+    participantCount: number;
+  }> {
+    const players = await this.redis.client.smembers(
+      RedisKeys.roomPlayers(roomId),
+    );
+    const live = new Set(connectedNicknames);
+    const removed = players.filter((n) => !live.has(n));
+    let participants = players;
+    let participantCount = players.length;
+    for (const nickname of removed) {
+      const after = await this.rooms.removeParticipant(roomId, nickname);
+      participants = after.participants;
+      participantCount = after.participantCount;
+    }
+    return { removed, participants, participantCount };
+  }
+
+  /**
+   * 아직 로비로 안 돌아온(ready 에 없는) 참가자를 명단에서 뺀다 — host 가 '그래도 시작'(force)을 눌렀을 때.
+   * 게임이 끝나면 각자 '방으로 돌아가기'(room:ready)를 눌러야 다음 게임에 낀다. 늦거나 결과창에 머문
+   * 참가자를 기다리지 않고 시작하기 위함이다. 제거된 사람에겐 게이트웨이가 game:missed 안내를 보낸다.
+   */
+  async dropNotReady(roomId: string): Promise<{
+    removed: string[];
+    participants: string[];
+    participantCount: number;
+  }> {
+    const pending = await this.rooms.pendingReturn(roomId);
+    let participants = await this.redis.client.smembers(
+      RedisKeys.roomPlayers(roomId),
+    );
+    let participantCount = participants.length;
+    for (const nickname of pending) {
+      const after = await this.rooms.removeParticipant(roomId, nickname);
+      participants = after.participants;
+      participantCount = after.participantCount;
+    }
+    return { removed: pending, participants, participantCount };
+  }
+
+  /**
    * host 가 '게임 시작 ▶' 을 눌러 참가자 대기(QR) 화면을 벗어나는 순간 — 아직 결과도,
    * 항목·라벨 편집도 끝나지 않았지만, 참가자를 대기 화면 대신 실제 게임 화면으로 옮겨
    * 호스트가 목록을 채우는 과정과 게임이 진행되는 과정을 실시간으로 함께 보게 한다.
@@ -1014,7 +1069,7 @@ export class GameService {
     };
   }
 
-  /** 지금부터 TURN_MS(60초) 뒤를 새 턴 제한시각(epoch ms)으로. */
+  /** 지금부터 TURN_MS(10초) 뒤를 새 턴 제한시각(epoch ms)으로. */
   private newTurnDeadline(): number {
     return Date.now() + BALLOON.TURN_MS;
   }

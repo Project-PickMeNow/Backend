@@ -36,12 +36,21 @@ export class RoomGateway
     ReturnType<typeof setTimeout>
   >();
 
+  // 호스트(방장)가 끊긴 뒤 '유예 후 방 닫기' 타이머. key=roomId.
+  // 유예 안에 host 가 재접속(handleConnection)하면 취소한다.
+  private readonly hostLeaves = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
   constructor(private readonly roomService: RoomService) {}
 
-  /** 종료 시 걸려 있던 유예 제거 타이머를 모두 정리한다(테스트·정상 종료에 잔여 타이머가 남지 않게). */
+  /** 종료 시 걸려 있던 유예 타이머를 모두 정리한다(테스트·정상 종료에 잔여 타이머가 남지 않게). */
   onModuleDestroy(): void {
     for (const timer of this.pendingLeaves.values()) clearTimeout(timer);
     this.pendingLeaves.clear();
+    for (const timer of this.hostLeaves.values()) clearTimeout(timer);
+    this.hostLeaves.clear();
   }
 
   /** 연결 수립 시 자동 실행 — 인증 → socket.data 세팅 → room:state 전송 → 접속자 수 broadcast */
@@ -65,6 +74,9 @@ export class RoomGateway
     client.data.roomId = roomId;
     client.data.role = role;
     await client.join(roomId);
+
+    // 방장이 (재)접속했으면, 걸려 있던 '방 닫기' 유예를 취소한다 — 새로고침·짧은 끊김으로 방이 닫히지 않게.
+    if (role === 'host') this.clearHostLeave(roomId);
 
     const onlineCount = await this.roomService.addOnline(roomId, client.id);
 
@@ -94,6 +106,10 @@ export class RoomGateway
         const status = await this.roomService.getStatus(roomId);
         if (status === 'waiting') this.scheduleLeave(roomId, nickname);
       }
+
+      // 방장(host)이 끊기면 유예 후 방을 닫는다 — 유예 안에 재접속하면 handleConnection 이 취소한다.
+      // 방이 닫히면 참가자 전원이 room:closed 로 홈으로 나가며 '방 삭제' 안내를 받는다.
+      if (client.data.role === 'host') this.scheduleHostLeave(roomId);
 
       this.server.to(roomId).emit('online:count', { onlineCount });
     } catch {
@@ -354,6 +370,54 @@ export class RoomGateway
     }
   }
 
+  /**
+   * 방장(host)이 끊긴 뒤 유예 시간이 지나도 재접속이 없으면 방을 닫도록 예약한다.
+   * 유예 안에 host 가 재접속하면 handleConnection 이 clearHostLeave 로 취소한다.
+   */
+  private scheduleHostLeave(roomId: string): void {
+    const existing = this.hostLeaves.get(roomId);
+    if (existing) clearTimeout(existing);
+    // 유예 시간은 상수(30초)를 기본으로 하되, HOST_GONE_GRACE_MS 환경변수로 재정의할 수 있다(테스트·튜닝용).
+    const graceMs =
+      Number(process.env.HOST_GONE_GRACE_MS) || ROOM.HOST_GONE_GRACE_MS;
+    const timer = setTimeout(() => {
+      this.hostLeaves.delete(roomId);
+      void this.finalizeHostLeave(roomId);
+    }, graceMs);
+    timer.unref?.();
+    this.hostLeaves.set(roomId, timer);
+  }
+
+  /** 걸려 있던 '방 닫기' 유예를 취소한다(host 재접속·명시적 방 종료 시). */
+  private clearHostLeave(roomId: string): void {
+    const timer = this.hostLeaves.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.hostLeaves.delete(roomId);
+    }
+  }
+
+  /**
+   * 유예가 다 지나도 방장이 안 돌아왔으면 방을 닫는다 — 참가자 전원이 room:closed 로 홈으로 나가며
+   * '방 삭제' 안내를 받는다. 유예 사이 host 가 재접속(살아있는 host 소켓이 있음)했으면 닫지 않는다.
+   */
+  private async finalizeHostLeave(roomId: string): Promise<void> {
+    try {
+      const sockets = await this.server.in(roomId).fetchSockets();
+      const hostPresent = sockets.some(
+        (s) => (s.data as AppSocket['data'])?.role === 'host',
+      );
+      if (hostPresent) return; // 방장이 유예 안에 돌아왔다 — 방 유지.
+
+      this.clearRoomLeaves(roomId); // 방이 사라지므로 남은 참가자 유예 타이머도 정리한다.
+      await this.roomService.closeRoom(roomId);
+      this.server.to(roomId).emit('room:closed', { roomId });
+      this.server.in(roomId).disconnectSockets(true);
+    } catch {
+      // 방이 이미 사라졌거나 종료 중이면 무시한다.
+    }
+  }
+
   /** 걸려 있던 유예 제거 타이머를 취소한다(재접속·명시적 나가기·방 종료 시). */
   private clearPendingLeave(roomId: string, nickname: string): void {
     const key = `${roomId}:${nickname}`;
@@ -391,6 +455,7 @@ export class RoomGateway
     if (role !== 'host') return this.fail(client, ERROR_CODES.NOT_HOST);
 
     this.clearRoomLeaves(roomId); // 방이 사라지므로 남은 유예 타이머도 정리한다.
+    this.clearHostLeave(roomId); // 명시적 종료 — '방장 끊김' 유예도 정리한다.
     await this.roomService.closeRoom(roomId);
     this.server.to(roomId).emit('room:closed', { roomId });
     this.server.in(roomId).disconnectSockets(true);

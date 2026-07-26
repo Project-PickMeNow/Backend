@@ -4,10 +4,12 @@ import {
   SubscribeMessage,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
+import { OnModuleDestroy } from '@nestjs/common';
 import { Server } from 'socket.io';
 import { GameService, GameError } from './game.service';
 import { ERROR_CODES } from '../../common/constants/error-code';
 import { BALLOON } from '../../common/constants/balloon';
+import { ROOM } from '../../common/constants/room';
 import type { AppSocket } from '../../common/types/socket';
 
 type Ack = { ok: true } | { ok: false; code: string };
@@ -26,26 +28,102 @@ type Ack = { ok: true } | { ok: false; code: string };
  *  roulette:draft — 원판 실시간 편집 미리보기
  */
 @WebSocketGateway({ namespace: '/rooms', cors: true })
-export class GameGateway implements OnGatewayDisconnect {
+export class GameGateway implements OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer() server: Server;
 
+  // 게임 중 끊긴 참가자의 '유예 후 게임 중단' 타이머. key=`${roomId}:${nickname}`.
+  // 유예 안에 같은 닉네임이 재접속하면(살아있는 소켓) finalizeGameAbort 가 재접속을 감지해 중단을 취소한다.
+  private readonly gameAborts = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
   constructor(private readonly gameService: GameService) {}
+
+  /** 종료 시 걸려 있던 게임-중단 유예 타이머를 모두 정리한다. */
+  onModuleDestroy(): void {
+    for (const timer of this.gameAborts.values()) clearTimeout(timer);
+    this.gameAborts.clear();
+  }
 
   /**
    * 소켓이 끊기면 그 소켓이 던진 표를 정리한다.
    * (RoomGateway 도 같은 네임스페이스에서 handleDisconnect 를 갖지만, 각 게이트웨이의
    *  disconnect 훅은 독립적으로 실행되므로 게임 도메인 정리는 여기서 한다.)
    * 표 키가 socket.id 라, 이 정리가 없으면 재접속 시 옛 표가 남아 중복 집계된다.
+   *
+   * 또한 게임 진행 중이던 참가자가 튕기면(유예 후 재접속 없음) 게임을 중단해 전원을 로비로 되돌린다.
    */
   async handleDisconnect(client: AppSocket): Promise<void> {
-    const { roomId } = client.data;
+    const { roomId, nickname, role } = client.data;
     if (!roomId) return;
     // 서버 종료 시 Redis 가 먼저 닫히는 레이스 — 정리는 best-effort.
     try {
       const tally = await this.gameService.removeVote(roomId, client.id);
       if (tally) this.server.to(roomId).emit('vote:updated', { tally });
+
+      // 게임 중(playing/finished) 참가자가 끊기면 유예 후 게임 중단을 예약한다(재접속하면 취소됨).
+      // 대기(waiting) 상태 끊김은 RoomGateway 가 처리하고, 호스트 끊김도 RoomGateway 가 방을 닫는다.
+      if (nickname && role !== 'host') {
+        const status = await this.gameService.getRoomStatus(roomId);
+        if (status === 'playing' || status === 'finished') {
+          this.scheduleGameAbort(roomId, nickname);
+        }
+      }
     } catch {
       // 종료 중 커넥션이 닫힌 경우 — 무시.
+    }
+  }
+
+  /**
+   * 게임 중 끊긴 참가자를 유예 시간 뒤에 내보내고(재접속 없으면) 게임을 중단하도록 예약한다.
+   * 유예 안에 같은 닉네임이 재접속하면 finalizeGameAbort 가 살아있는 소켓을 보고 중단을 취소한다.
+   */
+  private scheduleGameAbort(roomId: string, nickname: string): void {
+    const key = `${roomId}:${nickname}`;
+    const existing = this.gameAborts.get(key);
+    if (existing) clearTimeout(existing);
+    const graceMs =
+      Number(process.env.PLAYER_DROP_GRACE_MS) || ROOM.PLAYER_DROP_GRACE_MS;
+    const timer = setTimeout(() => {
+      this.gameAborts.delete(key);
+      void this.finalizeGameAbort(roomId, nickname);
+    }, graceMs);
+    timer.unref?.();
+    this.gameAborts.set(key, timer);
+  }
+
+  /**
+   * 유예가 지나도 참가자가 안 돌아왔으면 명단에서 빼고, 게임 중이었으면 방을 대기로 되돌려
+   * 전원(남은 참가자·호스트)을 로비로 복귀시킨다. 유예 안에 재접속했으면(살아있는 소켓) 아무것도 안 한다.
+   */
+  private async finalizeGameAbort(
+    roomId: string,
+    nickname: string,
+  ): Promise<void> {
+    try {
+      const sockets = await this.server.in(roomId).fetchSockets();
+      const live = sockets
+        .map((s) => (s.data as AppSocket['data'])?.nickname)
+        .filter((n): n is string => !!n);
+      const res = await this.gameService.abortForDisconnect(
+        roomId,
+        nickname,
+        live,
+      );
+      if (!res) return; // 재접속함 — 게임 유지.
+
+      this.server.to(roomId).emit('participant:left', {
+        nickname,
+        participants: res.participants,
+        participantCount: res.participantCount,
+      });
+      // 게임 중이었으면 전원 로비 복귀 — 남은 사람에게 중단 안내(nickname 동봉)를 보낸다.
+      if (res.aborted) {
+        this.server.to(roomId).emit('game:aborted', { nickname });
+      }
+    } catch {
+      // 방이 이미 사라졌거나(호스트가 닫음) 종료 중이면 무시한다.
     }
   }
 

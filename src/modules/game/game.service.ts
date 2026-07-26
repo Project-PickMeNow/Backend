@@ -295,11 +295,49 @@ export class GameService {
     );
   }
 
+  /** 방 진행 상태(waiting/playing/finished)를 읽는다 — 게이트웨이의 게임-중단 판단에 쓴다. */
+  getRoomStatus(roomId: string): Promise<string> {
+    return this.rooms.getStatus(roomId);
+  }
+
   /** 한 판 더 — 결과·투표·사다리를 지우고 대기 상태로 되돌린다. */
   async resetGame(roomId: string): Promise<void> {
     await this.loadRoomOrThrow(roomId);
     await this.clearRoundState(roomId);
     await this.redis.client.hset(RedisKeys.room(roomId), 'status', 'waiting');
+  }
+
+  /**
+   * 게임 중 참가자가 튕겼을 때(유예 후에도 재접속 없음) 처리한다.
+   * connectedNicknames 는 지금 이 방에 붙어 있는 참가자 닉네임들 — 그 안에 nickname 이 있으면
+   * 재접속(reclaim)한 것이라 아무것도 하지 않고 게임을 유지한다(null 반환).
+   * 없으면 그 참가자를 명단에서 빼고, 게임이 진행 중이었으면 방을 대기(로비)로 되돌린다
+   * (aborted=true). 반환값으로 게이트웨이가 participant:left·game:aborted 를 broadcast 한다.
+   */
+  async abortForDisconnect(
+    roomId: string,
+    nickname: string,
+    connectedNicknames: string[],
+  ): Promise<{
+    participants: string[];
+    participantCount: number;
+    aborted: boolean;
+  } | null> {
+    if (connectedNicknames.includes(nickname)) return null; // 재접속함 — 게임 유지.
+    // 이미 명단에서 빠진 닉네임이면(다음 게임 시작 시 prune·강퇴·이전 중단으로) 스테일 타이머다 — 무시한다.
+    // 이 가드가 없으면 게임1에서 걸린 타이머가 게임2(같은 방)를 status=playing 으로 보고 잘못 중단시킨다.
+    if (!(await this.rooms.isParticipant(roomId, nickname))) return null;
+    const room = await this.loadRoomOrThrow(roomId);
+    // 진행 중(playing)에 튕기면 판을 접고 전원 로비로. 결과 표시 중(finished)엔 남은 사람의 결과 화면을
+    // 방해하지 않도록, 튕긴 사람만 빼고 중단은 하지 않는다(호스트의 다음 게임 시작도 안 막히게 함).
+    const abort = room.status === 'playing';
+    const after = await this.rooms.removeParticipant(roomId, nickname);
+    if (abort) await this.resetGame(roomId);
+    return {
+      participants: after.participants,
+      participantCount: after.participantCount,
+      aborted: abort,
+    };
   }
 
   // ── 사다리타기 (개수 선택형, 네이버 스타일) ─────────────────

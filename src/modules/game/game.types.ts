@@ -172,7 +172,6 @@ export type VoteStatus = 'preparing' | 'open' | 'closing' | 'closed';
 export interface VoteStatePayload {
   status: VoteStatus;
   closeAt: number | null;
-  auto?: boolean; // closing 이 '전원 투표' 자동 마감이면 true(수동 마감은 없음/false) — 안내 문구 구분용
 }
 
 /** 투표: 집계 + 최다 득표 항목 */

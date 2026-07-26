@@ -302,9 +302,7 @@ export class GameGateway implements OnGatewayDisconnect {
         payload?.itemId,
       );
       this.server.to(roomId).emit('vote:updated', { tally });
-      // 전원이 투표했으면 자동으로 마감 카운트다운(closing)을 시작한다 — 상태가 바뀌면 전원에게 알린다.
-      const autoState = await this.gameService.maybeAutoCloseVote(roomId);
-      if (autoState) this.server.to(roomId).emit('vote:state', autoState);
+      // 투표 마감은 오직 host 가 '투표 마감'(vote:close)을 눌렀을 때만 한다 — 자동 마감 없음.
       return { ok: true };
     } catch (err) {
       if (err instanceof GameError) return this.fail(client, err.code);

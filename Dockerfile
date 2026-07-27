@@ -5,7 +5,7 @@
 # 시작 시 대기 중인 마이그레이션만 적용(migrate deploy) 후 앱을 실행한다.
 
 # ---- builder: 의존성 설치 + prisma generate + nest build ----
-FROM node:20-slim AS builder
+FROM node:26-slim AS builder
 WORKDIR /app
 
 # Prisma 엔진이 요구하는 openssl
@@ -25,7 +25,7 @@ COPY . .
 RUN npm run build
 
 # ---- runner: 실행에 필요한 것만 (devDeps 제외로 이미지 슬림) ----
-FROM node:20-slim AS runner
+FROM node:26-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

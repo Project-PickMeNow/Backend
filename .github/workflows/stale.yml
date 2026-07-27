@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Apply stale policy
-        uses: actions/stale@v9
+        uses: actions/stale@v10
         with:
           # ── 이슈 정책 ──────────────────────────────────────
           days-before-issue-stale: 30

@@ -12,6 +12,7 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { GAME_TYPES } from '../../../common/constants/game-type';
 import type { GameType } from '../../../common/constants/game-type';
 import { ROOM_CAPACITY } from '../../../common/constants/room-capacity';
@@ -22,16 +23,32 @@ import { ROOM_CAPACITY } from '../../../common/constants/room-capacity';
  * 통과 못 하면 VALIDATION_ERROR 로 400 이 나간다(전역 예외 필터가 형태를 맞춤).
  */
 export class CreateRoomDto {
+  @ApiPropertyOptional({
+    description: '방 제목 (선택, 50자 이하)',
+    maxLength: 50,
+    example: '점심 내기',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(50, { message: '방 제목은 50자 이하여야 합니다.' })
   title?: string; // 방 제목 (선택)
 
+  @ApiPropertyOptional({
+    description: '초기 게임 종류 (선택)',
+    enum: GAME_TYPES,
+    example: 'roulette',
+  })
   @IsOptional()
   @IsIn(GAME_TYPES, { message: '지원하지 않는 게임 종류입니다.' })
   gameType?: GameType; // 초기 게임 종류 (선택)
 
   /** 방 정원(호스트가 설정). 안 주면 기본 200. 2~200 범위. */
+  @ApiPropertyOptional({
+    description: `방 정원 (${ROOM_CAPACITY.MIN}~${ROOM_CAPACITY.MAX}, 기본 ${ROOM_CAPACITY.MAX})`,
+    minimum: ROOM_CAPACITY.MIN,
+    maximum: ROOM_CAPACITY.MAX,
+    example: 200,
+  })
   @IsOptional()
   @IsInt({ message: '정원은 정수여야 합니다.' })
   @Min(ROOM_CAPACITY.MIN, {
@@ -43,6 +60,10 @@ export class CreateRoomDto {
   maxParticipants?: number;
 
   /** 비밀방 여부. true 면 참가자는 입장 시 password 를 맞춰야 한다. */
+  @ApiPropertyOptional({
+    description: '비밀방 여부. true 면 입장 시 password 를 맞춰야 합니다.',
+    example: false,
+  })
   @IsOptional()
   @IsBoolean({ message: 'isSecret 은 boolean 이어야 합니다.' })
   isSecret?: boolean;
@@ -51,6 +72,12 @@ export class CreateRoomDto {
    * 비밀방 입장 비밀번호(숫자 최대 6자리). isSecret 이 true 일 때만 검증한다.
    * 서버는 이 값을 평문으로 저장하지 않는다(해시만 저장) — 응답에도 절대 내보내지 않는다.
    */
+  @ApiPropertyOptional({
+    description:
+      '비밀방 비밀번호(숫자 최대 6자리). isSecret=true 일 때만 필요. 서버는 해시만 저장하고 응답에 절대 노출하지 않습니다.',
+    example: '1234',
+    pattern: '^[0-9]{1,6}$',
+  })
   @ValidateIf((o: CreateRoomDto) => o.isSecret === true)
   @IsString({ message: '비밀번호는 문자열이어야 합니다.' })
   @IsNotEmpty({ message: '비밀방은 비밀번호가 필요합니다.' })
@@ -63,6 +90,11 @@ export class CreateRoomDto {
    * 방 유효기간 시작 시각(ISO 8601). 이 시각부터 참가자가 입장할 수 있다.
    * 안 주면 즉시(생성 시각). 형식만 검증하고, start<end·최대 7일 같은 관계 검증은 서비스가 한다.
    */
+  @ApiPropertyOptional({
+    description: '방 유효기간 시작(ISO 8601). 이 시각부터 입장 가능. 안 주면 즉시.',
+    format: 'date-time',
+    example: '2026-07-31T00:00:00.000Z',
+  })
   @IsOptional()
   @IsDateString({}, { message: 'startAt 은 ISO 8601 날짜여야 합니다.' })
   startAt?: string;
@@ -71,6 +103,12 @@ export class CreateRoomDto {
    * 방 유효기간 종료 시각(ISO 8601). 이 시각이 지나면 방이 자동으로 사라진다(Redis 절대 만료).
    * 안 주면 시작 시각 + 기본 TTL(3일). 시작~종료 최대 7일.
    */
+  @ApiPropertyOptional({
+    description:
+      '방 유효기간 종료(ISO 8601). 이 시각이 지나면 방이 자동 삭제. 안 주면 시작+3일. 시작~종료 최대 7일.',
+    format: 'date-time',
+    example: '2026-08-02T00:00:00.000Z',
+  })
   @IsOptional()
   @IsDateString({}, { message: 'endAt 은 ISO 8601 날짜여야 합니다.' })
   endAt?: string;

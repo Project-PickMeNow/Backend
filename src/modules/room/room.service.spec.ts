@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { RoomService } from './room.service';
 import { RedisService } from '../../infra/redis/redis.service';
 import { StatsService } from '../stats/stats.service';
+import { ROOM_CAPACITY } from '../../common/constants/room-capacity';
 
 /**
  * RoomService 단위 테스트 — Redis·Postgres 없이 도는 것을 목표로 한다.
@@ -112,31 +113,31 @@ describe('RoomService', () => {
       expect(hash.items).toBe('[]');
     });
 
-    it('정원을 안 주면 기본 50 으로 저장한다(게임 미선택 기본값)', async () => {
+    it('정원을 안 주면 기본값으로 저장한다(게임 미선택 기본값)', async () => {
       await service.createRoom({});
       const [, hash] = multiMock.hset.mock.calls[0] as [
         string,
         Record<string, string>,
       ];
-      expect(hash.maxParticipants).toBe('50');
+      expect(hash.maxParticipants).toBe(String(ROOM_CAPACITY.DEFAULT));
     });
 
     it('호스트가 정한 정원을 저장한다', async () => {
-      await service.createRoom({ maxParticipants: 30 });
+      await service.createRoom({ maxParticipants: ROOM_CAPACITY.MIN + 1 });
       const [, hash] = multiMock.hset.mock.calls[0] as [
         string,
         Record<string, string>,
       ];
-      expect(hash.maxParticipants).toBe('30');
+      expect(hash.maxParticipants).toBe(String(ROOM_CAPACITY.MIN + 1));
     });
 
-    it('정원은 하드 상한 50 을 넘지 못한다(클램프)', async () => {
+    it('정원은 하드 상한을 넘지 못한다(클램프)', async () => {
       await service.createRoom({ maxParticipants: 9999 });
       const [, hash] = multiMock.hset.mock.calls[0] as [
         string,
         Record<string, string>,
       ];
-      expect(hash.maxParticipants).toBe('50');
+      expect(hash.maxParticipants).toBe(String(ROOM_CAPACITY.MAX));
     });
 
     it('누적 통계 카운터를 올린다', async () => {
